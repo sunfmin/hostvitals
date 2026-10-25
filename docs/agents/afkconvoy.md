@@ -15,14 +15,16 @@ gate_seconds: 3600
 ready_label: ready-for-agent
 ```
 
-The fleet cuts a version when it goes idle with landed work past the newest
-`v*` tag (control ADR 0003). It lands the version change through the train,
-tags that commit, publishes both Mac archives and the generated formula,
-then upgrades the host's install. These are the release steps, the only
-place their sequence is written. Each block runs under `sh -e`, with the
+The fleet cuts its first version, declared by `initial` below, when it goes
+idle without a version tag. After that it cuts a version with landed work
+past the newest `v*` tag (control ADR 0003). It lands the version change
+through the train, tags that commit, publishes both Mac archives and the
+generated formula, then upgrades the host's install. These are the release
+steps, the only place their sequence is written. Each block runs under `sh -e`, with the
 version in `$VERSION`: `set` on `main`, `publish` at the new tag.
 
 ```yaml cut
+initial: 0.1.0
 set: |
   set -ex
   packaging/release.sh set "$VERSION"

@@ -1,0 +1,42 @@
+//! App accounting sums only processes macOS attributes to the same responsible process.
+use std::collections::BTreeMap;
+
+pub struct ProcessUsage {
+    pub app_pid: Option<u32>,
+    pub cpu_percent: Option<f64>,
+    pub resident_bytes: u64,
+    pub footprint_bytes: Option<u64>,
+    pub peak_footprint_bytes: Option<u64>,
+}
+pub struct AppUsage {
+    pub app_pid: u32,
+    pub process_count: usize,
+    pub cpu_percent: Option<f64>,
+    pub resident_bytes: Option<u64>,
+    pub footprint_bytes: Option<u64>,
+    pub peak_footprint_bytes: Option<u64>,
+}
+
+/// Unknown attribution is excluded; unknown measurements propagate into their App total.
+pub fn summarize(processes: &[ProcessUsage]) -> Vec<AppUsage> {
+    let mut apps = BTreeMap::new();
+    for p in processes {
+        if let Some(pid) = p.app_pid {
+            let app = apps.entry(pid).or_insert(AppUsage {
+                app_pid: pid,
+                process_count: 0,
+                cpu_percent: Some(0.0),
+                resident_bytes: Some(0),
+                footprint_bytes: Some(0),
+                peak_footprint_bytes: Some(0),
+            });
+            app.process_count = app.process_count.saturating_add(1);
+            app.cpu_percent = super::add_cpu(app.cpu_percent, p.cpu_percent);
+            app.resident_bytes = super::add_bytes(app.resident_bytes, Some(p.resident_bytes));
+            app.footprint_bytes = super::add_bytes(app.footprint_bytes, p.footprint_bytes);
+            app.peak_footprint_bytes =
+                super::add_bytes(app.peak_footprint_bytes, p.peak_footprint_bytes);
+        }
+    }
+    apps.into_values().collect()
+}

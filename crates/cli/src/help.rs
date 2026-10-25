@@ -19,6 +19,30 @@ pub(crate) struct Cli {
 
 #[derive(Subcommand)]
 pub(crate) enum Command {
+    /// Measures CPU and memory over one window for the host, every user's processes and their Apps.
+    ///
+    /// Run `hostvitals now --seconds 3 --top 10`. Reads two all-user `ps` snapshots, cumulative host CPU ticks, memory sysctls, process responsibility, and accessible rusage footprints. Only reads; saves nothing. `--seconds` and `--top` require a whole number at least 1. Refusals name the corrected command. Missing or malformed process or host snapshots refuse with a retry line; optional native reads are null with a `skipped` entry.
+    ///
+    /// Answers `source` (`host` or `fixtures`), `window_seconds` (actual monotonic time between process readings), `host`, `processes` (the entire final snapshot), `apps` (totals of those processes), `rankings` and `skipped`. Host CPU covers the same window with minor snapshot collection skew. CPU percentages for processes and Apps use one logical core as 100%, so multithreaded work can exceed 100%. Host percentages cover all cores and total 100%.
+    ///
+    /// `host.cpu` has `user_percent` (including nice), `system_percent`, `idle_percent`, `logical_cores` and `physical_cores`. `host.load_average` is the 1, 5 and 15 minute load. `host.memory` has `total_bytes`, `free_percent` (kern.memorystatus_level, not a resident-memory subtraction), `pressure` (normal, warn or critical), `swap_used_bytes`, `swap_total_bytes`, and `compressed_bytes` (physical compressed storage). Memory and load are read at the end of the window.
+    ///
+    /// Each process has `pid`, `parent_pid`, `uid`, `user`, `name` (executable name, no arguments), `started_at` (ps start time in UTC), `cpu_percent`, `resident_bytes`, `footprint_bytes`, `peak_footprint_bytes` (lifetime peak), and `app_pid` (responsible process). PID plus start time identifies a process. CPU is cumulative-time change over the window, never ps's lifetime percentage. A process absent at the first reading, a reused PID or a regressed counter has null CPU and is counted in `skipped`; an exited process is absent from the final snapshot. ps's hundredth-second CPU precision limits short-window accuracy.
+    ///
+    /// Each App has `app_pid`, `name`, `started_at`, `process_count`, `cpu_percent`, `resident_bytes`, `footprint_bytes`, and `peak_footprint_bytes`. Totals sum their processes; any missing input makes that total null. Peak is the sum of lifetime process peaks, not a simultaneous App peak. Apps follow macOS responsibility, never a name or parent heuristic. No other responsible process means its own App. An exited responsible process retains its app_pid with null name and started_at; an unreadable responsibility yields null app_pid and is skipped from App totals.
+    ///
+    /// `rankings` has `processes_by_cpu`, `processes_by_memory`, `apps_by_cpu`, `apps_by_memory`: each is up to `--top` full records, descending by cpu_percent or resident_bytes, tied by ascending PID. Null CPU is excluded from CPU rankings. Shared resident memory can be counted in multiple processes, so App resident totals are accounting sums, not unique physical RAM.
+    ///
+    /// `skipped` entries have `measurement`, `count` (affected processes or host fields), `reason`, and `fix`. Without root, other users' footprints are null and get one combined entry with `sudo hostvitals now`; their CPU and resident memory remain readable and ranked. Own-process rusage failures are separately aggregated. A missing private responsibility interface needs an updated hostvitals, rather than invented App attribution. Explicit HOSTVITALS_PROBE_FIXTURES native fixtures are labelled source fixtures and warned on stderr; missing fixtures never fall back to live reads.
+    #[command(next_help_heading = "Run by the agent", verbatim_doc_comment)]
+    Now {
+        /// Minimum seconds in the observation window; a whole number at least 1.
+        #[arg(long, default_value = "3", allow_hyphen_values = true, value_parser = seconds)]
+        seconds: std::num::NonZeroU64,
+        /// Maximum records in each ranking; a whole number at least 1.
+        #[arg(long, default_value = "10", allow_hyphen_values = true, value_parser = top)]
+        top: std::num::NonZeroUsize,
+    },
     /// Checks every observation source, reads the host, and changes nothing.
     ///
     /// Run this first, after a macOS update, or when a measurement is unavailable. Reads the Apple CLIs below with bounded, noninteractive probes. Process probes target this invocation, never an arbitrary process. Native reads check the observer's task information and cumulative counters, an actual IOReport Energy Model subscription and sample, and its responsible App. No report files are saved. The probes are independent checks, not one simultaneous resource measurement.
@@ -41,10 +65,27 @@ pub(crate) enum Command {
     /// With no topic, answers the index. `hostvitals help doctor` opens the doctor's help. An unknown topic refuses with a line to open the index.
     #[command(next_help_heading = "Run by the agent", verbatim_doc_comment)]
     Help {
-        /// `doctor` for the command, `all` for the full manual, or omit for the index.
+        /// `doctor` or `now` for a command, `all` for the full manual, or omit for the index.
         #[arg(verbatim_doc_comment)]
         topic: Option<String>,
     },
+}
+
+fn positive(value: &str, flag: &str) -> Result<u64, String> {
+    if !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()) {
+        if let Ok(n @ 1..) = value.parse() {
+            return Ok(n);
+        }
+    }
+    Err(format!(
+        "{flag} requires a whole number at least 1; run hostvitals now {flag} 1"
+    ))
+}
+fn seconds(value: &str) -> Result<std::num::NonZeroU64, String> {
+    positive(value, "--seconds").map(|n| std::num::NonZeroU64::new(n).unwrap())
+}
+fn top(value: &str) -> Result<std::num::NonZeroUsize, String> {
+    positive(value, "--top").map(|n| std::num::NonZeroUsize::new(n as usize).unwrap())
 }
 
 /// Assembles help directly from the command registry and the capability registry.

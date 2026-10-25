@@ -13,7 +13,7 @@ mod iostat;
 mod nettop;
 mod pmset;
 mod powermetrics;
-mod ps;
+pub(crate) mod ps;
 mod sample;
 mod top;
 mod vmmap;
@@ -77,7 +77,7 @@ impl Tool {
             Self::Powermetrics => powermetrics::args(&pid),
             Self::FsUsage => fs_usage::args(&pid),
         };
-        run(Command::new(path).args(args))
+        run(Command::new(path).args(args), false).map(|_| ())
     }
 }
 
@@ -89,21 +89,48 @@ pub struct StandIn {
     pub stderr: String,
     pub calls: Vec<Vec<String>>,
     pub delay_ms: u64,
+    pub stdout_readings: Vec<String>,
 }
 
 /// Maximum wall-clock duration of one Apple CLI capability check.
 pub const PROBE_TIMEOUT_SECONDS: u64 = 8;
 
-/// Discards observations and drains a bounded diagnostic buffer until the child exits.
-fn run(command: &mut Command) -> Result<(), String> {
+/// Bounds execution and diagnostics, retaining snapshot output only when requested.
+fn run(command: &mut Command, capture: bool) -> Result<Vec<u8>, String> {
     use std::io::Read;
     let mut child = command
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(if capture {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| e.to_string())?;
     let stderr = child.stderr.take().ok_or("no diagnostic pipe")?;
+    let stdout = child.stdout.take();
+    let output = thread::spawn(move || {
+        let mut captured = Vec::new();
+        let mut overflow = false;
+        if let Some(mut stdout) = stdout {
+            let mut buf = [0; 8192];
+            loop {
+                let n = stdout.read(&mut buf).map_err(|e| e.to_string())?;
+                if n == 0 {
+                    break;
+                }
+                let keep = n.min((64 * 1024 * 1024usize).saturating_sub(captured.len()));
+                overflow |= keep < n;
+                captured.extend_from_slice(&buf[..keep]);
+            }
+        }
+        if overflow {
+            Err("process snapshot exceeded 64 MiB".to_string())
+        } else {
+            Ok(captured)
+        }
+    });
     // Drain continuously: a verbose failure must not block the child before the deadline.
     let reader = thread::spawn(move || {
         let mut captured = Vec::new();
@@ -140,8 +167,9 @@ fn run(command: &mut Command) -> Result<(), String> {
     let diagnostic = reader
         .join()
         .unwrap_or_else(|_| "diagnostic reader failed".into());
+    let output = output.join().map_err(|_| "observation reader failed")?;
     match status {
-        Ok(status) if status.success() => Ok(()),
+        Ok(status) if status.success() => output,
         Ok(status) => Err(format!("{status}: {diagnostic}")),
         Err(error) => Err(error),
     }

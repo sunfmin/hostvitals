@@ -73,15 +73,13 @@ unsafe extern "C" {
 }
 /// Reads the observer, whose pid and ownership cannot change during the call.
 pub fn read() -> Reading<Counters> {
+    read_pid(std::process::id())
+}
+/// Reads one process; a denial or exit remains an unavailable reading.
+pub fn read_pid(pid: u32) -> Reading<Counters> {
     let mut usage = RusageV6::default();
     // SAFETY: flavor 6 writes exactly rusage_info_v6 into this aligned, writable buffer.
-    let status = unsafe {
-        proc_pid_rusage(
-            std::process::id() as i32,
-            6,
-            (&mut usage as *mut RusageV6).cast(),
-        )
-    };
+    let status = unsafe { proc_pid_rusage(pid as i32, 6, (&mut usage as *mut RusageV6).cast()) };
     if status != 0 {
         return Reading::Unavailable {
             reason: format!("proc_pid_rusage v6: {}", std::io::Error::last_os_error()),

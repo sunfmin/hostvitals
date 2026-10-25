@@ -74,6 +74,18 @@ fn version_identifies_the_release_and_checkout() {
         .unwrap();
     assert!(out.status.success());
     let version = String::from_utf8(out.stdout).unwrap();
-    assert!(version.starts_with("hostvitals 0.1.0+"), "{version}");
-    assert!(version.contains(".g"), "{version}");
+    if version.trim() == "hostvitals 0.1.0" {
+        let tag = Command::new("git")
+            .args(["describe", "--exact-match", "--tags", "--match", "v0.1.0"])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output()
+            .unwrap();
+        assert!(
+            tag.status.success(),
+            "a release version requires its exact tag"
+        );
+    } else {
+        assert!(version.starts_with("hostvitals 0.1.0+"), "{version}");
+        assert!(version.contains(".g"), "{version}");
+    }
 }

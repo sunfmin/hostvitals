@@ -88,7 +88,7 @@ fn stalled_and_verbose_cli_failures_are_bounded_and_do_not_hide_other_checks() {
 }
 
 #[test]
-fn doctor_reports_every_missing_cli_and_skips_root_measurements() {
+fn doctor_reports_every_missing_cli() {
     let lab = Lab::new();
     let out = lab.run(&["doctor"]);
     assert!(
@@ -197,6 +197,14 @@ fn real_host_smoke_has_bounded_native_observations() {
             .iter()
             .find(|c| c["name"] == name)
             .unwrap();
+        // Private interfaces and rusage v6 vary by OS and hardware. Their absence
+        // is a supported doctor answer, not a failure of the live smoke test.
+        if check["status"] == "unavailable" {
+            assert!(!check["reason"].as_str().unwrap().is_empty());
+            assert!(!check["fix"].as_str().unwrap().is_empty());
+            assert!(check.get("data").is_none());
+            continue;
+        }
         assert_eq!(check["status"], "available", "{check}");
         let data = &check["data"];
         match name {

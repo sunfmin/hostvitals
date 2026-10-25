@@ -1,0 +1,23 @@
+[workspace]
+resolver = "3"
+members = ["crates/policy", "crates/cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/sunfmin/hostvitals"
+
+[workspace.dependencies]
+flux-rs = { git = "https://github.com/flux-rs/flux.git", rev = "b2f3e31e17727ffe08c2efee1e7aa0bc4f0a66f9" }
+flux-core = { git = "https://github.com/flux-rs/flux.git", rev = "b2f3e31e17727ffe08c2efee1e7aa0bc4f0a66f9" }
+flux-alloc = { git = "https://github.com/flux-rs/flux.git", rev = "b2f3e31e17727ffe08c2efee1e7aa0bc4f0a66f9" }
+agent-help = { git = "https://github.com/sunfmin/agent-cli.git", rev = "4988a0dc796515ac6ad88318afa0848224573dee" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4.5", features = ["derive", "env"] }
+
+[workspace.metadata.checker]
+nightly = "nightly-2026-09-25"
+fixpoint = "0.9.6.3.8 (684d0829c19fbee83b892c9f5e20c2598897297c)"
+z3 = "5.1.0"

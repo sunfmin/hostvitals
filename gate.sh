@@ -1,7 +1,39 @@
-#!/bin/sh
-# The definition of "may land". Until the cargo workspace exists there is
-# nothing to check; the first ticket replaces this with the full gate.
-set -e
-test -f Cargo.toml || { echo "no cargo workspace yet: nothing to check"; exit 0; }
-echo "gate.sh has not been written for the workspace yet" >&2
-exit 1
+#!/usr/bin/env bash
+# The definition of "may land": the same for a person and for afkconvoy.
+set -euo pipefail
+cd "$(dirname "$0")"
+
+# It runs on rustup's nightly, the one cargo-flux is built for,
+# whatever the shell that started it has on its PATH: a Homebrew `cargo` ahead
+# of rustup's breaks when Homebrew moves a library under it. The release
+# builds on stable, where Flux's attributes expand to nothing.
+PATH="$HOME/.cargo/bin:$PATH"
+RUSTUP_TOOLCHAIN=$(sed -n 's/^nightly = "\(.*\)"$/\1/p' Cargo.toml)
+export PATH RUSTUP_TOOLCHAIN
+
+cargo fmt --all --check
+
+# The gate's reading of Flux's summaries is itself tested.
+./flux-summary-test.sh >/dev/null
+
+# Flux runs first, alone: beside the tests it shares the cores, and its time
+# measures them. A solver query past twenty seconds fails naming its function
+# (`-Ffixpoint-timeout`), it checks on past an error so one run names every
+# slow function (`-Fcatch-bugs`), and it reports the slowest (`-Ftimings`).
+# Every function of every pure crate is checked: Flux's summary of each one
+# must say `0 trusted; 0 ignored` (./flux-summary.sh reads it).
+FLUXFLAGS=""
+export FLUXFLAGS
+flux_log=$(mktemp)
+trap 'rm -f "$flux_log"' EXIT
+./verify.sh --message-format=json-render-diagnostics >"$flux_log" 2>&1 && flux_status=0 || flux_status=$?
+awk '!/^\{/' "$flux_log" >&2
+[ "$flux_status" -eq 0 ] || exit "$flux_status"
+# shellcheck disable=SC2046
+./flux-summary.sh "$flux_log" $(./verify.sh --list)
+
+cargo clippy --workspace --all-targets --quiet -- -D warnings
+
+# nextest holds each test to the limit .config/nextest.toml gives.
+cargo build --locked --quiet -p hostvitals --example probe-cli
+cargo nextest run --workspace --cargo-quiet --status-level fail --final-status-level fail --show-progress none

@@ -11,8 +11,14 @@ fn main() {
     let path = Path::new(&dir).join(format!("{}.json", tool.name()));
     let mut state: StandIn = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     state.calls.push(args[1..].to_vec());
+    let stdout = state
+        .stdout_readings
+        .get(state.calls.len() - 1)
+        .cloned()
+        .unwrap_or_else(|| state.stdout.clone());
     fs::write(path, serde_json::to_vec(&state).unwrap()).unwrap();
     std::thread::sleep(std::time::Duration::from_millis(state.delay_ms));
     eprint!("{}", state.stderr);
+    print!("{stdout}");
     std::process::exit(state.exit_code);
 }

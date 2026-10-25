@@ -2,6 +2,7 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{fs, path::PathBuf};
 
+pub mod host;
 pub mod ioreport;
 pub mod libproc;
 pub mod responsibility;

@@ -422,6 +422,7 @@ fn network_failures_skip_only_network_and_never_accept_a_partial_or_invented_rep
             .contains("permission denied")
     );
     fs::remove_file(lab.0.join("bin/nettop")).unwrap();
+    lab.write("ps", json!({"stdout":row(1, 501, "0:00.00", 1, "/one")}));
     let a = lab.answer();
     assert!(a["skipped"][0]["fix"].as_str().unwrap().contains("PATH="));
     assert!(a["host"]["network"]["bytes_out_per_second"].is_null());

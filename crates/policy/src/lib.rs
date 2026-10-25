@@ -14,12 +14,12 @@ pub fn may_probe(present: bool, needs_root: bool, is_root: bool) -> bool {
 #[allow(dead_code)]
 mod rejected {
     // This would permit a root-only measurement before obtaining root.
-    #[should_fail]
+    #[flux_rs::should_fail]
     fn unprivileged_root_probe() {
         flux_rs::assert(super::may_probe(true, true, false));
     }
     // This would claim that finding a command can be skipped.
-    #[should_fail]
+    #[flux_rs::should_fail]
     fn absent_executable_probe() {
         flux_rs::assert(super::may_probe(false, false, true));
     }

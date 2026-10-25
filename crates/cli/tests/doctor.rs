@@ -160,7 +160,7 @@ fn unprivileged_doctor_reads_available_clis_but_never_launches_root_tools() {
             .iter()
             .find(|c| c["name"] == tool.name())
             .unwrap();
-        if tool.needs_root() {
+        if ["powermetrics", "fs_usage"].contains(&tool.name()) {
             assert_eq!(check["status"], "skipped", "{check}");
             assert_eq!(check["fix"], "sudo hostvitals doctor");
             assert!(lab.calls(tool.name()).is_empty());

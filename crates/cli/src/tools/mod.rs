@@ -13,7 +13,7 @@ mod iostat;
 mod nettop;
 mod pmset;
 mod powermetrics;
-mod ps;
+pub(crate) mod ps;
 mod sample;
 mod top;
 pub(crate) mod vmmap;
@@ -77,7 +77,7 @@ impl Tool {
             Self::Powermetrics => powermetrics::args(&pid),
             Self::FsUsage => fs_usage::args(&pid),
         };
-        run(Command::new(path).args(args))
+        run(Command::new(path).args(args), false).map(|_| ())
     }
 }
 
@@ -90,6 +90,7 @@ pub struct StandIn {
     pub calls: Vec<Vec<String>>,
     pub delay_ms: u64,
     pub stdout: String,
+    pub stdout_readings: Vec<String>,
 }
 
 /// Captures a measurement with bounded output and time; truncated reports are never parsed.
@@ -100,6 +101,7 @@ pub(crate) fn capture(tool: Tool, args: Vec<&str>) -> Result<String, String> {
         MEASUREMENT_LIMIT_MIB * 1024 * 1024,
         MEASUREMENT_TIMEOUT_SECONDS,
     )
+    .and_then(|bytes| String::from_utf8(bytes).map_err(|_| "report is not UTF-8".into()))
 }
 
 /// Maximum report size; exceeding it skips the read rather than interpreting a partial report.
@@ -111,16 +113,21 @@ pub const MEASUREMENT_TIMEOUT_SECONDS: u64 = 30;
 /// Maximum wall-clock duration of one Apple CLI capability check.
 pub const PROBE_TIMEOUT_SECONDS: u64 = 8;
 
-/// Discards observations and drains a bounded diagnostic buffer until the child exits.
-fn run(command: &mut Command) -> Result<(), String> {
-    execute(command, 0, PROBE_TIMEOUT_SECONDS).map(|_| ())
+/// Bounds execution and diagnostics, retaining snapshot output only when requested.
+fn run(command: &mut Command, capture: bool) -> Result<Vec<u8>, String> {
+    execute(
+        command,
+        if capture { 64 * 1024 * 1024 } else { 0 },
+        PROBE_TIMEOUT_SECONDS,
+    )
 }
 
-fn drain(mut pipe: impl std::io::Read, limit: usize) -> (Vec<u8>, bool) {
+fn drain(mut pipe: impl std::io::Read, limit: usize) -> std::io::Result<(Vec<u8>, bool)> {
     let mut captured = Vec::new();
     let mut overflow = false;
     let mut buf = [0; 4096];
-    while let Ok(n) = pipe.read(&mut buf) {
+    loop {
+        let n = pipe.read(&mut buf)?;
         if n == 0 {
             break;
         }
@@ -128,10 +135,10 @@ fn drain(mut pipe: impl std::io::Read, limit: usize) -> (Vec<u8>, bool) {
         captured.extend_from_slice(&buf[..keep]);
         overflow |= keep < n;
     }
-    (captured, overflow)
+    Ok((captured, overflow))
 }
 
-fn execute(command: &mut Command, limit: usize, timeout: u64) -> Result<String, String> {
+fn execute(command: &mut Command, limit: usize, timeout: u64) -> Result<Vec<u8>, String> {
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -162,17 +169,21 @@ fn execute(command: &mut Command, limit: usize, timeout: u64) -> Result<String, 
             }
         }
     };
-    let (diagnostic, _) = reader.join().map_err(|_| "diagnostic reader failed")?;
+    let (diagnostic, _) = reader
+        .join()
+        .map_err(|_| "diagnostic reader failed")?
+        .map_err(|e| e.to_string())?;
     let diagnostic = String::from_utf8_lossy(&diagnostic);
     let (output, overflow) = output_reader
         .join()
-        .map_err(|_| "observation reader failed")?;
+        .map_err(|_| "observation reader failed")?
+        .map_err(|e| e.to_string())?;
     match status {
         Ok(status) if status.success() => {
             if limit != 0 && overflow {
                 return Err(format!("report exceeded {limit} bytes"));
             }
-            String::from_utf8(output).map_err(|_| "report is not UTF-8".into())
+            Ok(output)
         }
         Ok(status) => Err(format!("{status}: {diagnostic}")),
         Err(error) => Err(error),

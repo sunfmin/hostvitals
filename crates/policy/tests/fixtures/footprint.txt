@@ -1,0 +1,33 @@
+================================================================================
+zsh [29682]: 64-bit    Footprint: 1966488 B (16384 bytes per page)
+================================================================================
+
+      Dirty     (Swapped)         Clean   Reclaimable    Regions    Category
+        ---           ---           ---           ---        ---    ---
+   573440 B           0 B           0 B           0 B          9    Malloc Metadata
+   458752 B           0 B           0 B           0 B          5    Malloc Small
+   295320 B           0 B           0 B           0 B          1    page table
+   119293 B           0 B           0 B           0 B         73    __DATA
+   117216 B           0 B           0 B           0 B         36    __DATA_DIRTY
+   107931 B           0 B           0 B           0 B        209    unused dyld shared cache area
+    98304 B           0 B           0 B           0 B          1    Malloc Tiny
+    65536 B           0 B           0 B           0 B          5    Untagged
+    32768 B           0 B           0 B           0 B          2    Stack
+    31616 B           0 B           0 B           0 B          1    __OBJC_RW
+    16384 B           0 B           0 B           0 B          1    Deferred Reclaim
+    16384 B           0 B           0 B           0 B          1    OS Alloc Once
+    16384 B           0 B           0 B           0 B          1    Activity Tracing
+    16312 B           0 B           0 B           0 B          4    __TPRO_CONST
+      848 B           0 B           0 B           0 B         15    __AUTH
+        0 B           0 B      540672 B           0 B         86    __TEXT
+        0 B           0 B       16384 B           0 B         41    __DATA_CONST
+        0 B           0 B       16384 B           0 B          2    __LINKEDIT
+        0 B           0 B           0 B           0 B         43    __AUTH_CONST
+        0 B           0 B           0 B           0 B          1    __OBJC_RO
+        0 B           0 B           0 B           0 B          1    mapped file
+        ---           ---           ---           ---        ---    ---
+  1966488 B           0 B      573440 B           0 B        540    TOTAL
+
+Auxiliary data:
+    phys_footprint: 1966488 B
+    phys_footprint_peak: 1982872 B

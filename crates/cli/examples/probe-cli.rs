@@ -15,7 +15,7 @@ fn main() {
         .stdout_readings
         .get(state.calls.len() - 1)
         .cloned()
-        .unwrap_or_default();
+        .unwrap_or_else(|| state.stdout.clone());
     fs::write(path, serde_json::to_vec(&state).unwrap()).unwrap();
     std::thread::sleep(std::time::Duration::from_millis(state.delay_ms));
     eprint!("{}", state.stderr);

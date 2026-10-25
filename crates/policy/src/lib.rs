@@ -97,3 +97,5 @@ mod rejected {
         flux_rs::assert(super::may_probe(false, false, true));
     }
 }
+
+pub mod memory;

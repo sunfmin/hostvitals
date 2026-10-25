@@ -45,3 +45,18 @@ _Avoid_: Root cause (a frequent path alone does not establish causation).
 
 **Redacted**: An observed value deliberately withheld from output to avoid revealing sensitive information; its omission is explicit.
 _Avoid_: Missing, unknown (neither states that a value was withheld).
+
+**Memory region**: A range of a Process's virtual address space with one kind of use, such as a stack, mapped file or malloc allocation. Virtual size can include reserved space that occupies no RAM.
+_Avoid_: Footprint (a reservation is not a charge).
+
+**Dirty**: Resident memory modified by the Process that cannot simply be discarded and read back from its backing file.
+_Avoid_: Swapped (Dirty here describes memory still resident).
+
+**Clean**: Resident memory that is not Dirty, such as an unmodified file mapping. Clean shared memory need not be charged to one Process's Footprint.
+_Avoid_: Free (Clean memory is still resident).
+
+**Swapped**: Memory moved out of a Process's resident pages, including compressed memory as counted by macOS.
+_Avoid_: Disk usage (compressed memory may stay in RAM).
+
+**Malloc zone**: A named allocator pool holding a Process's malloc allocations. Its region sizes and the bytes in its live allocations describe different aspects of the same pool.
+_Avoid_: Memory region (one zone can hold many regions).

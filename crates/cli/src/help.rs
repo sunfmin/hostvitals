@@ -36,12 +36,34 @@ pub(crate) enum Command {
     /// {table:tools}
     #[command(next_help_heading = "Run by the agent", verbatim_doc_comment)]
     Doctor,
+    /// Explains what one process's memory is made of, without saving reports or changing it.
+    ///
+    /// Run `hostvitals memory 123 --top 5`. Reads `vmmap -summary`, `vmmap -wide -noCoalesce`, and `footprint -p PID -f bytes --swapped` once each. Each read is bounded to {const:MEASUREMENT_TIMEOUT_SECONDS} seconds and {const:MEASUREMENT_LIMIT_MIB} MiB of output. These are sequential observations of a running process, so they can differ as memory changes. PID must be positive; --top must be positive and defaults to {const:MEMORY_DEFAULT_TOP}.
+    ///
+    /// Answers one JSON object with `pid`, `top` (requested region limit), `footprint`, `region_kinds`, `malloc_zones`, and `largest_regions`. Every section has `status`: `available` or `skipped`. A skipped section has `reason` and `fix` (the command line to take the read); it has no invented zero or empty reading. Sections fail independently and the command exits zero even if all reads are skipped. Invalid arguments refuse with `error` and nonzero exit.
+    ///
+    /// Available `footprint` has `bytes`: exact charged memory from footprint's phys_footprint counter, distinct from RAM. The other available sections have `items` arrays. Each region-kind item has `kind` (Apple's region type), `regions` (non-coalesced count), and `memory`. Each malloc-zone item has `zone` (name including its address), `allocations` (allocation count), `allocated_bytes` (live allocations), `regions` (region count), and `memory`. An empty malloc-zone table is an observed empty array.
+    ///
+    /// Each `memory` object has `virtual_bytes` (address-space size), `resident_bytes` (RAM), `dirty_bytes` (resident modified memory), `swapped_bytes` (swapped or compressed memory), and `clean_bytes` (resident minus dirty). vmmap rounds its text sizes: these byte conversions preserve that reported precision, not exact page accounting. K, M, G and T mean powers of 1024. Clean shared file mappings need not be charged to this process; do not add region totals to obtain Footprint.
+    ///
+    /// Each largest-region item has `kind`, `address` (start-end range, or kernel-kernel for kernel accounting), `detail` (Apple's permissions, sharing, path or zone text), `memory`, and `dirty_swapped_bytes`. Items follow vmmap's size ranking: dirty plus swapped descending, then virtual size descending, then address ascending. Returns at most `top` items; guard reservations do not outrank memory just because they reserve a large address range.
+    ///
+    /// Access denied is skipped with `sudo hostvitals memory PID --top N` for the caller to run; hostvitals never invokes sudo. Missing tools include a PATH repair; unrecognized reports include an update command. Exited or protected processes may remain unreadable even as root. Native probe fixtures do not replace memory readings; tests can place Apple CLI stand-ins on PATH.
+    #[command(next_help_heading = "Run by the agent", verbatim_doc_comment)]
+    Memory {
+        /// Positive process ID to observe.
+        #[arg(value_parser = clap::value_parser!(u32).range(1..))]
+        pid: u32,
+        /// Maximum number of largest regions.
+        #[arg(long, default_value_t = crate::memory::DEFAULT_TOP, value_parser = clap::value_parser!(u32).range(1..))]
+        top: u32,
+    },
     /// Opens a command's help, the index, or the whole manual with `hostvitals help all`.
     ///
     /// With no topic, answers the index. `hostvitals help doctor` opens the doctor's help. An unknown topic refuses with a line to open the index.
     #[command(next_help_heading = "Run by the agent", verbatim_doc_comment)]
     Help {
-        /// `doctor` for the command, `all` for the full manual, or omit for the index.
+        /// `doctor` or `memory` for a command, `all` for the full manual, or omit for the index.
         #[arg(verbatim_doc_comment)]
         topic: Option<String>,
     },
@@ -52,6 +74,12 @@ pub(crate) fn manual() -> Help {
     Help::new(Cli::command())
         .table::<Tool>("tools")
         .constant("PROBE_TIMEOUT_SECONDS", crate::tools::PROBE_TIMEOUT_SECONDS)
+        .constant(
+            "MEASUREMENT_TIMEOUT_SECONDS",
+            crate::tools::MEASUREMENT_TIMEOUT_SECONDS,
+        )
+        .constant("MEASUREMENT_LIMIT_MIB", crate::tools::MEASUREMENT_LIMIT_MIB)
+        .constant("MEMORY_DEFAULT_TOP", crate::memory::DEFAULT_TOP)
 }
 #[cfg(test)]
 mod tests {

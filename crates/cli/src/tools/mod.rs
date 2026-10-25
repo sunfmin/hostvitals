@@ -7,7 +7,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-mod footprint;
+pub(crate) mod footprint;
 mod fs_usage;
 mod iostat;
 mod nettop;
@@ -16,7 +16,7 @@ mod powermetrics;
 mod ps;
 mod sample;
 mod top;
-mod vmmap;
+pub(crate) mod vmmap;
 
 /// The closed set of Apple CLIs doctor probes, shared with the CLI stand-in.
 #[derive(Clone, Copy, clap::ValueEnum, agent_help::Help)]
@@ -89,46 +89,71 @@ pub struct StandIn {
     pub stderr: String,
     pub calls: Vec<Vec<String>>,
     pub delay_ms: u64,
+    pub stdout: String,
 }
+
+/// Captures a measurement with bounded output and time; truncated reports are never parsed.
+pub(crate) fn capture(tool: Tool, args: Vec<&str>) -> Result<String, String> {
+    let path = tool.find().ok_or("executable not found on PATH")?;
+    execute(
+        Command::new(path).args(args),
+        MEASUREMENT_LIMIT_MIB * 1024 * 1024,
+        MEASUREMENT_TIMEOUT_SECONDS,
+    )
+}
+
+/// Maximum report size; exceeding it skips the read rather than interpreting a partial report.
+pub const MEASUREMENT_LIMIT_MIB: usize = 32;
+
+/// Maximum time for each process-memory read, independent of doctor's smaller probes.
+pub const MEASUREMENT_TIMEOUT_SECONDS: u64 = 30;
 
 /// Maximum wall-clock duration of one Apple CLI capability check.
 pub const PROBE_TIMEOUT_SECONDS: u64 = 8;
 
 /// Discards observations and drains a bounded diagnostic buffer until the child exits.
 fn run(command: &mut Command) -> Result<(), String> {
-    use std::io::Read;
+    execute(command, 0, PROBE_TIMEOUT_SECONDS).map(|_| ())
+}
+
+fn drain(mut pipe: impl std::io::Read, limit: usize) -> (Vec<u8>, bool) {
+    let mut captured = Vec::new();
+    let mut overflow = false;
+    let mut buf = [0; 4096];
+    while let Ok(n) = pipe.read(&mut buf) {
+        if n == 0 {
+            break;
+        }
+        let keep = n.min(limit.saturating_sub(captured.len()));
+        captured.extend_from_slice(&buf[..keep]);
+        overflow |= keep < n;
+    }
+    (captured, overflow)
+}
+
+fn execute(command: &mut Command, limit: usize, timeout: u64) -> Result<String, String> {
     let mut child = command
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| e.to_string())?;
     let stderr = child.stderr.take().ok_or("no diagnostic pipe")?;
+    let stdout = child.stdout.take().ok_or("no observation pipe")?;
+    let output_reader = thread::spawn(move || drain(stdout, limit));
     // Drain continuously: a verbose failure must not block the child before the deadline.
-    let reader = thread::spawn(move || {
-        let mut captured = Vec::new();
-        let mut stderr = stderr;
-        let mut buf = [0; 4096];
-        while let Ok(n) = stderr.read(&mut buf) {
-            if n == 0 {
-                break;
-            }
-            let keep = n.min(4096usize.saturating_sub(captured.len()));
-            captured.extend_from_slice(&buf[..keep]);
-        }
-        String::from_utf8_lossy(&captured).trim().to_string()
-    });
+    let reader = thread::spawn(move || drain(stderr, 4096));
     let start = Instant::now();
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Ok(status),
-            Ok(None) if start.elapsed() < Duration::from_secs(PROBE_TIMEOUT_SECONDS) => {
+            Ok(None) if start.elapsed() < Duration::from_secs(timeout) => {
                 thread::sleep(Duration::from_millis(10))
             }
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                break Err(format!("probe exceeded {PROBE_TIMEOUT_SECONDS} seconds"));
+                break Err(format!("read exceeded {timeout} seconds"));
             }
             Err(e) => {
                 let _ = child.kill();
@@ -137,11 +162,18 @@ fn run(command: &mut Command) -> Result<(), String> {
             }
         }
     };
-    let diagnostic = reader
+    let (diagnostic, _) = reader.join().map_err(|_| "diagnostic reader failed")?;
+    let diagnostic = String::from_utf8_lossy(&diagnostic);
+    let (output, overflow) = output_reader
         .join()
-        .unwrap_or_else(|_| "diagnostic reader failed".into());
+        .map_err(|_| "observation reader failed")?;
     match status {
-        Ok(status) if status.success() => Ok(()),
+        Ok(status) if status.success() => {
+            if limit != 0 && overflow {
+                return Err(format!("report exceeded {limit} bytes"));
+            }
+            String::from_utf8(output).map_err(|_| "report is not UTF-8".into())
+        }
         Ok(status) => Err(format!("{status}: {diagnostic}")),
         Err(error) => Err(error),
     }

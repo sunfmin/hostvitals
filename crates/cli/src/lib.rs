@@ -7,6 +7,7 @@ compile_error!("hostvitals supports macOS arm64 and x86_64 only");
 mod direct;
 mod doctor;
 mod help;
+mod memory;
 pub mod tools;
 
 use clap::FromArgMatches;
@@ -36,6 +37,7 @@ pub fn main(args: impl IntoIterator<Item = OsString>) -> ExitCode {
         Err(e) => return refuse(format!("{e}; run hostvitals --help")),
     };
     match cli.command {
+        help::Command::Memory { pid, top } => println!("{}", memory::answer(pid, top)),
         help::Command::Doctor => {
             let source =
                 direct::Source(std::env::var_os("HOSTVITALS_PROBE_FIXTURES").map(Into::into));

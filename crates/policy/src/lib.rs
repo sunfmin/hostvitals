@@ -4,6 +4,7 @@ extern crate flux_core;
 
 use flux_rs::attrs::*;
 pub mod apps;
+pub mod findings;
 
 /// A probe may execute only after its executable is found and its privilege requirement is met.
 #[spec(fn(present: bool, needs_root: bool, is_root: bool) -> bool[present && (!needs_root || is_root)])]

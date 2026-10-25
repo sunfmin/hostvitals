@@ -1,0 +1,19 @@
+[package]
+name = "hostvitals-policy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+flux-rs.workspace = true
+flux-core.workspace = true
+flux-alloc.workspace = true
+
+[package.metadata.flux]
+enabled = true
+check_overflow = "strict"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(flux)'] }

@@ -7,6 +7,8 @@ pub struct ProcessUsage {
     pub resident_bytes: u64,
     pub footprint_bytes: Option<u64>,
     pub peak_footprint_bytes: Option<u64>,
+    pub bytes_in_per_second: Option<f64>,
+    pub bytes_out_per_second: Option<f64>,
 }
 pub struct AppUsage {
     pub app_pid: u32,
@@ -15,6 +17,8 @@ pub struct AppUsage {
     pub resident_bytes: Option<u64>,
     pub footprint_bytes: Option<u64>,
     pub peak_footprint_bytes: Option<u64>,
+    pub bytes_in_per_second: Option<f64>,
+    pub bytes_out_per_second: Option<f64>,
 }
 
 /// Unknown attribution is excluded; unknown measurements propagate into their App total.
@@ -29,9 +33,15 @@ pub fn summarize(processes: &[ProcessUsage]) -> Vec<AppUsage> {
                 resident_bytes: Some(0),
                 footprint_bytes: Some(0),
                 peak_footprint_bytes: Some(0),
+                bytes_in_per_second: Some(0.0),
+                bytes_out_per_second: Some(0.0),
             });
             app.process_count = app.process_count.saturating_add(1);
-            app.cpu_percent = super::add_cpu(app.cpu_percent, p.cpu_percent);
+            app.cpu_percent = super::add_rates(app.cpu_percent, p.cpu_percent);
+            app.bytes_in_per_second =
+                super::add_rates(app.bytes_in_per_second, p.bytes_in_per_second);
+            app.bytes_out_per_second =
+                super::add_rates(app.bytes_out_per_second, p.bytes_out_per_second);
             app.resident_bytes = super::add_bytes(app.resident_bytes, Some(p.resident_bytes));
             app.footprint_bytes = super::add_bytes(app.footprint_bytes, p.footprint_bytes);
             app.peak_footprint_bytes =

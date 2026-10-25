@@ -10,7 +10,7 @@ use std::{
 pub(crate) mod footprint;
 mod fs_usage;
 mod iostat;
-mod nettop;
+pub(crate) mod nettop;
 mod pmset;
 mod powermetrics;
 pub(crate) mod ps;

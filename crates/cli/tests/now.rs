@@ -470,6 +470,53 @@ fn network_uses_elapsed_time_handles_column_order_and_breaks_ties_by_pid() {
 }
 
 #[test]
+fn network_host_total_overflow_skips_only_the_affected_direction() {
+    let rows = row(1, 501, "0:00.00", 1, "/one") + &row(2, 501, "0:00.00", 1, "/two");
+    let lab = Lab::new(rows.clone(), rows);
+    lab.process(1, 1);
+    lab.process(2, 2);
+    lab.write(
+        "nettop",
+        json!({"stdout_readings":[
+            ",bytes_in,bytes_out,\none.1,0,0,\ntwo.2,0,0,\n",
+            ",bytes_in,bytes_out,\none.1,18446744073709551615,10,\ntwo.2,18446744073709551615,20,\n"
+        ]}),
+    );
+    let a = lab.answer();
+    let seconds = a["host"]["network"]["window_seconds"].as_f64().unwrap();
+    assert!(a["host"]["network"]["bytes_in_per_second"].is_null());
+    assert!(
+        (a["host"]["network"]["bytes_out_per_second"]
+            .as_f64()
+            .unwrap()
+            * seconds
+            - 30.0)
+            .abs()
+            < 0.001
+    );
+    assert_eq!(
+        a["rankings"]["processes_by_network_in"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        a["rankings"]["apps_by_network_in"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    let skipped = a["skipped"].as_array().unwrap();
+    assert_eq!(skipped.len(), 1);
+    assert_eq!(
+        skipped[0]["measurement"],
+        "host.network.bytes_in_per_second"
+    );
+}
+
+#[test]
 fn churn_and_missing_native_reads_remain_explicit_and_never_become_zeroes() {
     let before = row(10, 501, "1-00:00:00.00", 100, "/App Parent")
         + &row(11, 501, "10:00:00.00", 200, "/child")
@@ -620,6 +667,21 @@ fn live_now_reads_host_and_every_user_without_root() {
     );
     let a: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(a["source"], "host");
+    assert!(a["host"]["network"]["window_seconds"].as_f64().unwrap() >= 1.0);
+    let network_processes = a["processes"].as_array().unwrap();
+    for direction in ["bytes_in_per_second", "bytes_out_per_second"] {
+        assert!(
+            network_processes.iter().any(
+                |p| p["uid"] == 0 && p["network"][direction].as_f64().is_some_and(|n| n >= 0.0)
+            ),
+            "root network unreadable: {a}"
+        );
+        for p in network_processes {
+            if let Some(rate) = p["network"][direction].as_f64() {
+                assert!(rate.is_finite() && rate >= 0.0);
+            }
+        }
+    }
     let cpu = &a["host"]["cpu"];
     let mut total = 0.0;
     for key in ["user_percent", "system_percent", "idle_percent"] {

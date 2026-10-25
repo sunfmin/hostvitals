@@ -4,6 +4,7 @@ extern crate flux_core;
 
 use flux_rs::attrs::*;
 pub mod apps;
+pub mod network;
 
 /// A probe may execute only after its executable is found and its privilege requirement is met.
 #[spec(fn(present: bool, needs_root: bool, is_root: bool) -> bool[present && (!needs_root || is_root)])]
@@ -11,9 +12,9 @@ pub fn may_probe(present: bool, needs_root: bool, is_root: bool) -> bool {
     present && (!needs_root || is_root)
 }
 
-/// Only matching process identities with monotonic cumulative counters yield a CPU delta.
+/// Only matching process identities with monotonic cumulative counters yield a delta.
 #[spec(fn(before: u64, after: u64, same_process: bool) -> Option<u64[after - before]>[same_process && after >= before])]
-pub fn cpu_delta(before: u64, after: u64, same_process: bool) -> Option<u64> {
+pub fn counter_delta(before: u64, after: u64, same_process: bool) -> Option<u64> {
     if same_process && after >= before {
         Some(after - before)
     } else {
@@ -49,7 +50,7 @@ pub fn add_bytes(a: Option<u64>, b: Option<u64>) -> Option<u64> {
         _ => None,
     }
 }
-pub fn add_cpu(a: Option<f64>, b: Option<f64>) -> Option<f64> {
+pub fn add_rates(a: Option<f64>, b: Option<f64>) -> Option<f64> {
     match (a, b) {
         (Some(a), Some(b)) => Some(a + b),
         _ => None,
@@ -72,7 +73,7 @@ pub fn rank_order(a: f64, a_pid: u32, b: f64, b_pid: u32) -> std::cmp::Ordering 
 mod rejected {
     #[flux_rs::should_fail]
     fn reused_pid_cpu() {
-        flux_rs::assert(super::cpu_delta(100, 200, false).is_some());
+        flux_rs::assert(super::counter_delta(100, 200, false).is_some());
     }
     #[flux_rs::should_fail]
     fn another_users_footprint() {
@@ -80,7 +81,7 @@ mod rejected {
     }
     #[flux_rs::should_fail]
     fn counter_change_is_not_zero() {
-        flux_rs::assert(super::cpu_delta(100, 150, true).unwrap() == 0);
+        flux_rs::assert(super::counter_delta(100, 150, true).unwrap() == 0);
     }
     #[flux_rs::should_fail]
     fn wrapped_ticks_are_not_zero() {

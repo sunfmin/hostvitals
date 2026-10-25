@@ -16,7 +16,7 @@ npx skills add sunfmin/hostvitals
 
 Some measurements need root and are skipped without it. hostvitals never runs `sudo` itself; `hostvitals doctor` reports the observation capabilities here and the fixes for anything missing.
 
-Build locally with `cargo build --locked -p hostvitals` on macOS arm64 or x86_64. Stable Rust builds the binary; the pinned nightly runs the verification gate. `./gate.sh` is the same gate locally and in CI: format, Flux alone (no trusted or ignored functions), clippy, then nextest. The checker versions and nightly live in `Cargo.toml`; `./verify.sh` rejects mismatches with installation instructions. Install nextest with `brew install cargo-nextest`.
+Build locally with `cargo build --locked -p hostvitals` on macOS arm64 or x86_64. Stable Rust builds the binary; the pinned nightly runs the verification gate. `./gate.sh` is the same gate locally and in CI: format, Flux alone (no trusted or ignored functions), clippy, release packaging checks, then nextest. The checker versions and nightly live in `Cargo.toml`; `./verify.sh` rejects mismatches with installation instructions. Install nextest with `brew install cargo-nextest`.
 
 The effect crate owns native reads, CLI execution and JSON. The policy crate has no I/O and every function passes Flux. Real-binary integration tests substitute a cargo example for each Apple CLI on PATH. Build that stand-in with `cargo build --example probe-cli` before running an individual integration test; the gate builds it automatically.
 

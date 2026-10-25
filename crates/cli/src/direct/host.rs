@@ -31,7 +31,10 @@ struct Swap {
     page_size: u32,
     encrypted: i32,
 }
-// SAFETY: implementations must be plain Darwin ABI values valid for every bit pattern.
+/// Values that can receive a Darwin sysctl's bytes.
+///
+/// # Safety
+/// Implementations must be plain Darwin ABI values valid for every bit pattern.
 unsafe trait SysctlValue: Default {}
 unsafe impl SysctlValue for u32 {}
 unsafe impl SysctlValue for i32 {}

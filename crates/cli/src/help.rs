@@ -72,10 +72,11 @@ pub(crate) enum Command {
 }
 
 fn positive(value: &str, flag: &str) -> Result<u64, String> {
-    if !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()) {
-        if let Ok(n @ 1..) = value.parse() {
-            return Ok(n);
-        }
+    if !value.is_empty()
+        && value.bytes().all(|b| b.is_ascii_digit())
+        && let Ok(n @ 1..) = value.parse()
+    {
+        return Ok(n);
     }
     Err(format!(
         "{flag} requires a whole number at least 1; run hostvitals now {flag} 1"

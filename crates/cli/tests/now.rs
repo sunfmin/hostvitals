@@ -23,8 +23,10 @@ impl Lab {
             .unwrap()
             .join("examples/probe-cli");
         assert!(standin.exists(), "cargo build --example probe-cli first");
-        std::os::unix::fs::symlink(standin, lab.0.join("bin/ps")).unwrap();
+        std::os::unix::fs::symlink(&standin, lab.0.join("bin/ps")).unwrap();
+        std::os::unix::fs::symlink(&standin, lab.0.join("bin/nettop")).unwrap();
         lab.write("ps", json!({"stdout_readings":[before,after]}));
+        lab.write("nettop", json!({"stdout":",bytes_in,bytes_out,\n"}));
         for (i, ticks) in [[100, 200, 300, 0], [130, 210, 360, 0]]
             .into_iter()
             .enumerate()
@@ -72,6 +74,76 @@ fn row(pid: u32, uid: u32, cpu: &str, rss: u64, name: &str) -> String {
         "{pid} 1 {uid} {} {cpu} {rss} Mon Oct 12 17:34:33 2026 {name}\n",
         if uid == 0 { "root" } else { "owner" }
     )
+}
+
+#[test]
+fn network_rates_include_root_and_rank_processes_and_complete_apps_without_dns() {
+    let rows = row(10, 0, "0:00.00", 1, "/root daemon")
+        + &row(20, 501, "0:00.00", 1, "/App")
+        + &row(21, 501, "0:00.00", 1, "/helper")
+        + &row(30, 501, "0:00.00", 1, "/idle");
+    let lab = Lab::new(rows.clone(), rows);
+    for (pid, app) in [(10, 10), (20, 20), (21, 20), (30, 30)] {
+        lab.process(pid, app);
+    }
+    lab.write("nettop", json!({"stdout_readings":[
+        ",bytes_in,bytes_out,\nroot daemon.10,9000000000,8000000000,\nApp.20,10000,20000,\nhelper,with.dots.21,30000,40000,\n",
+        ",bytes_in,bytes_out,\nroot daemon.10,9000000600,8000000100,\nApp.20,10400,20500,\nhelper,with.dots.21,30300,40600,\n"
+    ]}));
+    let a = lab.answer();
+    let seconds = a["host"]["network"]["window_seconds"].as_f64().unwrap();
+    assert!(seconds >= 1.0);
+    for (key, expected) in [
+        ("bytes_in_per_second", 1300.0),
+        ("bytes_out_per_second", 1200.0),
+    ] {
+        assert!((a["host"]["network"][key].as_f64().unwrap() * seconds - expected).abs() < 0.001);
+    }
+    let root = &a["processes"][0];
+    assert_eq!(root["uid"], 0);
+    assert!(
+        (root["network"]["bytes_in_per_second"].as_f64().unwrap() * seconds - 600.0).abs() < 0.001
+    );
+    assert_eq!(a["processes"][3]["network"]["bytes_in_per_second"], 0.0);
+    assert_eq!(a["rankings"]["processes_by_network_in"][0]["pid"], 10);
+    assert_eq!(a["rankings"]["processes_by_network_out"][0]["pid"], 21);
+    for key in [
+        "processes_by_network_in",
+        "processes_by_network_out",
+        "apps_by_network_in",
+        "apps_by_network_out",
+    ] {
+        assert_eq!(a["rankings"][key].as_array().unwrap().len(), 2);
+    }
+    let app = &a["rankings"]["apps_by_network_in"][0];
+    assert_eq!(app["app_pid"], 20);
+    assert_eq!(app["process_count"], 2);
+    assert!(
+        (app["network"]["bytes_in_per_second"].as_f64().unwrap() * seconds - 700.0).abs() < 0.001
+    );
+    assert_eq!(a["rankings"]["apps_by_network_out"][0]["app_pid"], 20);
+    let state: Value =
+        serde_json::from_slice(&fs::read(lab.0.join("nettop.json")).unwrap()).unwrap();
+    let calls = state["calls"].as_array().unwrap();
+    assert_eq!(calls.len(), 2);
+    for call in calls {
+        let args = call.as_array().unwrap();
+        for flag in ["-n", "-P", "-x"] {
+            assert!(args.contains(&json!(flag)), "{call}");
+        }
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == [json!("-J"), json!("bytes_in,bytes_out")])
+        );
+        assert!(
+            !args.contains(&json!("-p")),
+            "must include every user: {call}"
+        );
+        assert!(
+            !args.contains(&json!("-d")),
+            "must read cumulative counters: {call}"
+        );
+    }
 }
 
 #[test]
@@ -206,12 +278,193 @@ fn now_rejects_invalid_limits_and_explains_every_answer_key() {
         "processes_by_memory",
         "apps_by_cpu",
         "apps_by_memory",
+        "network",
+        "bytes_in_per_second",
+        "bytes_out_per_second",
+        "processes_by_network_in",
+        "processes_by_network_out",
+        "apps_by_network_in",
+        "apps_by_network_out",
         "measurement",
         "count",
         "reason",
         "fix",
     ] {
         assert!(help.contains(key), "missing {key}: {help}");
+    }
+}
+
+#[test]
+fn network_churn_and_regressions_are_null_and_do_not_form_partial_app_or_host_rates() {
+    let before = row(10, 501, "0:00.00", 1, "/App")
+        + &row(11, 501, "0:00.00", 1, "/reused")
+        + &row(12, 501, "0:00.00", 1, "/regressed")
+        + &row(13, 501, "0:00.00", 1, "/exited")
+        + &row(15, 501, "0:00.00", 1, "/lost socket")
+        + &row(16, 501, "0:00.00", 1, "/gained socket");
+    let after = row(10, 501, "0:00.00", 1, "/App")
+        + &row(11, 501, "0:00.00", 1, "/reused").replace("Oct 12", "Oct 25")
+        + &row(12, 501, "0:00.00", 1, "/regressed")
+        + &row(14, 501, "0:00.00", 1, "/new")
+        + &row(15, 501, "0:00.00", 1, "/lost socket")
+        + &row(16, 501, "0:00.00", 1, "/gained socket");
+    let lab = Lab::new(before, after);
+    for pid in [10, 11, 12, 14, 15, 16] {
+        lab.process(pid, if pid == 12 { 12 } else { 10 });
+    }
+    lab.write("nettop", json!({"stdout_readings":[
+        ",bytes_in,bytes_out,\nApp.10,100,200,\nreused.11,500,600,\nregressed.12,1000,1000,\nexited.13,50,60,\nlost.15,100,200,\n",
+        ",bytes_in,bytes_out,\nApp.10,150,260,\nreused.11,700,800,\nregressed.12,500,1100,\nnew.14,100,200,\ngained.16,100,200,\n"
+    ]}));
+    let a = lab.answer();
+    let processes = a["processes"].as_array().unwrap();
+    for pid in [11, 14, 15, 16] {
+        let p = processes.iter().find(|p| p["pid"] == pid).unwrap();
+        assert!(p["network"]["bytes_in_per_second"].is_null(), "{p}");
+        assert!(p["network"]["bytes_out_per_second"].is_null(), "{p}");
+    }
+    let regressed = processes.iter().find(|p| p["pid"] == 12).unwrap();
+    assert!(regressed["network"]["bytes_in_per_second"].is_null());
+    assert!(
+        regressed["network"]["bytes_out_per_second"]
+            .as_f64()
+            .unwrap()
+            > 0.0
+    );
+    let app = a["apps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["app_pid"] == 10)
+        .unwrap();
+    assert!(app["network"]["bytes_in_per_second"].is_null());
+    assert!(app["network"]["bytes_out_per_second"].is_null());
+    assert_eq!(a["rankings"]["apps_by_network_in"], json!([]));
+    assert_eq!(a["rankings"]["apps_by_network_out"][0]["app_pid"], 12);
+    assert_eq!(
+        a["rankings"]["processes_by_network_in"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(a["host"]["network"]["bytes_in_per_second"].is_null());
+    assert!(a["host"]["network"]["bytes_out_per_second"].is_null());
+    let skipped = a["skipped"].as_array().unwrap();
+    assert!(
+        skipped
+            .iter()
+            .any(|s| s["measurement"] == "network.bytes_in_per_second" && s["count"] == 5)
+    );
+    assert!(
+        skipped
+            .iter()
+            .any(|s| s["measurement"] == "host.network.bytes_out_per_second" && s["count"] == 1)
+    );
+}
+
+#[test]
+fn network_failures_skip_only_network_and_never_accept_a_partial_or_invented_report() {
+    for text in [
+        "",
+        "permission denied",
+        ",bytes_in,bytes_out,\none.1,10,20,\nbroken\n",
+        ",bytes_in,bytes_out,\none.1,10,20,\none.1,10,20,\n",
+        ",bytes_in,bytes_out,\none.1,18446744073709551616,20,\n",
+        ",bytes_in,bytes_out,\none.1,-1,20,\n",
+        ",bytes_in,bytes_out,\none.1,+1,20,\n",
+        ",bytes_in,bytes_out,\none.1,1 KiB,20,\n",
+        ",bytes_in,bytes_out,\none.1,10,\n",
+        ",bytes_in,bytes_out,\none.4294967296,10,20,\n",
+        ",bytes_in,other,\none.1,10,20,\n",
+    ] {
+        let rows = row(1, 501, "0:00.00", 1, "/one");
+        let lab = Lab::new(rows.clone(), rows);
+        lab.process(1, 1);
+        lab.write(
+            "nettop",
+            json!({"stdout_readings":[",bytes_in,bytes_out,\none.1,10,20,\n",text]}),
+        );
+        let a = lab.answer();
+        assert!(a["host"]["network"]["window_seconds"].is_null(), "{text}");
+        assert!(
+            a["processes"][0]["network"]["bytes_in_per_second"].is_null(),
+            "{text}"
+        );
+        assert_eq!(a["rankings"]["processes_by_network_in"], json!([]));
+        assert_eq!(a["processes"][0]["cpu_percent"], 0.0);
+        let skipped = a["skipped"].as_array().unwrap();
+        let network = skipped
+            .iter()
+            .find(|s| s["measurement"] == "network")
+            .unwrap();
+        assert_eq!(network["count"], 2);
+        assert!(network["reason"].as_str().unwrap().contains("nettop"));
+        assert!(
+            network["fix"]
+                .as_str()
+                .unwrap()
+                .contains("hostvitals doctor")
+        );
+    }
+    let rows = row(1, 501, "0:00.00", 1, "/one");
+    let lab = Lab::new(rows.clone(), rows);
+    lab.process(1, 1);
+    lab.write(
+        "nettop",
+        json!({"exit_code":77,"stderr":"permission denied"}),
+    );
+    let a = lab.answer();
+    assert!(
+        a["skipped"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("permission denied")
+    );
+    fs::remove_file(lab.0.join("bin/nettop")).unwrap();
+    let a = lab.answer();
+    assert!(a["skipped"][0]["fix"].as_str().unwrap().contains("PATH="));
+    assert!(a["host"]["network"]["bytes_out_per_second"].is_null());
+}
+
+#[test]
+fn network_uses_elapsed_time_handles_column_order_and_breaks_ties_by_pid() {
+    let rows = row(1, 501, "0:00.00", 1, "/one") + &row(2, 501, "0:00.00", 1, "/two");
+    let lab = Lab::new(rows.clone(), rows);
+    lab.process(1, 1);
+    lab.process(2, 2);
+    lab.write("nettop", json!({"delay_ms":200,"stdout_readings":[
+        ",bytes_out,bytes_in,\ntwo.2,18446744073709551610,100,\none.1,18446744073709551610,100,\n",
+        ",bytes_in,bytes_out\none.1,400,18446744073709551615\ntwo.2,400,18446744073709551615\n"
+    ]}));
+    let a = lab.answer();
+    let seconds = a["host"]["network"]["window_seconds"].as_f64().unwrap();
+    assert!(seconds >= 1.2);
+    assert!(
+        (a["host"]["network"]["bytes_in_per_second"]
+            .as_f64()
+            .unwrap()
+            * seconds
+            - 600.0)
+            .abs()
+            < 0.001
+    );
+    assert!(
+        (a["host"]["network"]["bytes_out_per_second"]
+            .as_f64()
+            .unwrap()
+            * seconds
+            - 10.0)
+            .abs()
+            < 0.001
+    );
+    for key in ["processes_by_network_in", "processes_by_network_out"] {
+        assert_eq!(a["rankings"][key][0]["pid"], 1);
+        assert_eq!(a["rankings"][key][1]["pid"], 2);
+    }
+    for key in ["apps_by_network_in", "apps_by_network_out"] {
+        assert_eq!(a["rankings"][key][0]["app_pid"], 1);
+        assert_eq!(a["rankings"][key][1]["app_pid"], 2);
     }
 }
 

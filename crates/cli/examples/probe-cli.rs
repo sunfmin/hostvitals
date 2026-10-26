@@ -1,9 +1,24 @@
-//! A stand-in for each Apple CLI, selected by argv[0], with one JSON state file per tool.
+//! Apple CLI stand-ins and a sleeping live Profile target, selected by argv[0].
 use hostvitals::tools::{StandIn, Tool};
-use std::{env, fs, path::Path};
+use std::{
+    env, fs,
+    path::Path,
+    thread,
+    time::{Duration, Instant},
+};
 fn main() {
     let args: Vec<_> = env::args().collect();
     let name = Path::new(&args[0]).file_name().unwrap().to_str().unwrap();
+    if name == "profile-target" {
+        let dir = Path::new(&args[1]);
+        fs::write(dir.join("target-ready"), "").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !dir.join("target-release").exists() {
+            assert!(Instant::now() < deadline, "profile target was not released");
+            thread::sleep(Duration::from_millis(10));
+        }
+        return;
+    }
     let Some(tool) = Tool::all().iter().find(|tool| tool.name() == name) else {
         return;
     };

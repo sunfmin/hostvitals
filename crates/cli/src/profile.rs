@@ -45,9 +45,13 @@ pub(crate) fn answer(pid: u32, seconds: u64, top: u32) -> Value {
         }
         Err(reason) => skipped(
             answer,
-            report
-                .failure
-                .unwrap_or_else(|| format!("unrecognized sample report: {reason}")),
+            report.failure.unwrap_or_else(|| {
+                if text.trim().is_empty() || reason == "no sampled call stacks found" {
+                    "no call stacks collected; the Process may have ended before sampling began; retry while it is running".into()
+                } else {
+                    format!("unrecognized sample report: {reason}")
+                }
+            }),
             &command,
         ),
     }

@@ -3,8 +3,10 @@ use std::os::unix::fs::PermissionsExt;
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Child, Command},
     sync::atomic::{AtomicUsize, Ordering},
+    thread,
+    time::{Duration, Instant},
 };
 
 static NEXT: AtomicUsize = AtomicUsize::new(0);
@@ -179,6 +181,35 @@ fn denied_missing_and_malformed_reads_are_skipped_with_retry_lines_and_no_fake_c
         "unrecognized report"
     );
 
+    for report in ["", "Call graph:\n\nBinary Images:\n"] {
+        lab.write(json!({"report":report}));
+        let (out, answer) = lab.run(&["profile", "123"]);
+        assert!(out.status.success());
+        assert_eq!(answer["status"], "skipped");
+        assert!(
+            answer["reason"]
+                .as_str()
+                .unwrap()
+                .contains("no call stacks collected")
+        );
+        assert_eq!(answer["fix"], "hostvitals profile 123 --seconds 5 --top 10");
+        for key in [
+            "total_samples",
+            "waiting_samples",
+            "mostly_waiting",
+            "hot_paths",
+            "top_frames",
+        ] {
+            assert!(answer.get(key).is_none(), "{key}: {answer}");
+        }
+        let path = answer["report_path"].as_str().unwrap();
+        assert_eq!(fs::read_to_string(path).unwrap(), report);
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
     fs::remove_file(lab.0.join("bin/sample")).unwrap();
     let (out, answer) = lab.run(&["profile", "123"]);
     assert!(out.status.success());
@@ -309,32 +340,141 @@ fn oversized_reports_remain_complete_on_disk_and_are_never_summarized() {
 #[test]
 fn live_ended_process_retains_the_same_report_that_was_summarized() {
     let lab = Lab::new();
-    let mut child = Command::new("/bin/sleep").arg("0.5").spawn().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_hostvitals"))
-        .args(["profile", &child.id().to_string(), "--seconds", "1"])
-        .env("TMPDIR", &lab.0)
-        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
-        .env_remove("HOSTVITALS_PROBE_FIXTURES")
-        .output();
-    child.wait().unwrap();
-    let out = output.unwrap();
-    let answer: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert!(out.status.success(), "{answer}");
-    assert_eq!(answer["status"], "available", "{answer}");
+    let target = lab.0.join("bin/profile-target");
+    fs::rename(lab.0.join("bin/sample"), &target).unwrap();
+    // Delay observer startup beyond the old child's entire lifetime. The target
+    // stays asleep until sample announces collection, then is released below.
+    let sample = lab.0.join("bin/sample");
+    // A pseudo-terminal makes sample's progress line visible before exit;
+    // script flushes it immediately rather than buffering it for 30 seconds.
+    fs::write(&sample, "#!/bin/sh\n/bin/sleep 0.6\nexec /usr/bin/script -qFe \"$HOSTVITALS_LIVE_SAMPLE_PROGRESS\" /usr/bin/sample \"$@\"\n").unwrap();
+    fs::set_permissions(&sample, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut child = ReapedChild(Command::new(target).arg(&lab.0).spawn().unwrap());
+    let ready_deadline = Instant::now() + Duration::from_secs(10);
+    while !lab.0.join("target-ready").exists() {
+        assert!(
+            child.0.try_wait().unwrap().is_none(),
+            "target exited before readiness"
+        );
+        assert!(
+            Instant::now() < ready_deadline,
+            "target did not become ready"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    let progress = lab.0.join("progress.txt");
+    let answer_path = lab.0.join("answer.json");
+    let mut observer = ReapedChild(
+        Command::new(env!("CARGO_BIN_EXE_hostvitals"))
+            .args(["profile", &child.0.id().to_string(), "--seconds", "3"])
+            .env("TMPDIR", &lab.0)
+            .env(
+                "PATH",
+                format!(
+                    "{}:/usr/bin:/bin:/usr/sbin:/sbin",
+                    lab.0.join("bin").display()
+                ),
+            )
+            .env("HOSTVITALS_LIVE_SAMPLE_PROGRESS", &progress)
+            .env_remove("HOSTVITALS_PROBE_FIXTURES")
+            .stdout(fs::File::create(&answer_path).unwrap())
+            .spawn()
+            .unwrap(),
+    );
+    let collection_deadline = Instant::now() + Duration::from_secs(10);
+    while !fs::read_to_string(&progress)
+        .unwrap_or_default()
+        .contains("Sampling process")
+    {
+        assert!(
+            observer.0.try_wait().unwrap().is_none(),
+            "observer exited before collection: {}",
+            fs::read_to_string(&answer_path).unwrap()
+        );
+        assert!(
+            Instant::now() < collection_deadline,
+            "sample did not announce collection: {}",
+            fs::read_to_string(&progress).unwrap_or_default()
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    let collecting = Instant::now();
+    thread::sleep(Duration::from_millis(250));
+    assert!(child.0.try_wait().unwrap().is_none());
+    fs::write(lab.0.join("target-release"), "").unwrap();
+    let completion_deadline = Instant::now() + Duration::from_secs(10);
+    while child.0.try_wait().unwrap().is_none() {
+        assert!(
+            Instant::now() < completion_deadline,
+            "profile did not finish after target release"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(child.0.wait().unwrap().success());
+    let ended_after = collecting.elapsed();
+    assert!(
+        ended_after < Duration::from_secs(3),
+        "target must end before the requested Window completes"
+    );
+    let observation_deadline = Instant::now() + Duration::from_secs(40);
+    while observer.0.try_wait().unwrap().is_none() {
+        assert!(
+            Instant::now() < observation_deadline,
+            "observer did not finish"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    let answer: Value = serde_json::from_slice(&fs::read(answer_path).unwrap()).unwrap();
+    let path = answer["report_path"].as_str().unwrap();
+    let text = fs::read_to_string(path).unwrap();
+    eprintln!("retained live report before cleanup:\n{text}");
+    assert!(observer.0.wait().unwrap().success(), "{answer}\n{text}");
+    assert_eq!(answer["status"], "available", "{answer}\n{text}");
     assert!(answer["total_samples"].as_u64().unwrap() > 0);
     assert!(answer["waiting_samples"].as_u64().unwrap() > 0);
     assert_eq!(answer["mostly_waiting"], true);
-    let path = answer["report_path"].as_str().unwrap();
-    let text = fs::read_to_string(path).unwrap();
     let summary = hostvitals_policy::profile::summarize(&text, 10).unwrap();
     assert_eq!(answer["total_samples"], summary.total_samples);
     assert_eq!(answer["waiting_samples"], summary.waiting_samples);
     assert_eq!(
-        answer["top_frames"][0]["sample_count"],
-        summary.top_frames[0].sample_count
+        answer["top_frames"],
+        json!(
+            summary
+                .top_frames
+                .iter()
+                .map(|frame| json!({"frame":frame.frame,"sample_count":frame.sample_count}))
+                .collect::<Vec<_>>()
+        )
+    );
+    assert_eq!(
+        answer["hot_paths"],
+        json!(summary.hot_paths.iter().map(|path| json!({"frames":path.frames,"sample_count":path.sample_count,"share":path.share})).collect::<Vec<_>>())
     );
     assert_eq!(
         fs::metadata(path).unwrap().permissions().mode() & 0o777,
         0o600
     );
+    assert_eq!(
+        fs::metadata(Path::new(path).parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    eprintln!(
+        "live profile: {} samples, {} waiting; target ended {} ms after collection announcement",
+        summary.total_samples,
+        summary.waiting_samples,
+        ended_after.as_millis()
+    );
+}
+
+struct ReapedChild(Child);
+
+impl Drop for ReapedChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
 }

@@ -492,3 +492,70 @@ fn live_sockets_include_connected_ipv4_and_listening_ipv6_without_losing_ports()
         "{sockets:?}"
     );
 }
+
+#[test]
+fn collector_warnings_and_malformed_files_never_become_complete_lists() {
+    let lab = Lab::new();
+    lab.write("process-owner", json!({"status":"available","data":0}));
+    let mut lsof: Value =
+        serde_json::from_slice(&fs::read(lab.0.join("lsof.json")).unwrap()).unwrap();
+    lsof["stderr"] = json!("warning: cannot examine a file");
+    lab.write("lsof", lsof);
+    lab.write("fs_usage", json!({"stderr":"events were lost"}));
+    let (out, a) = lab.run();
+    assert!(out.status.success());
+    assert!(a["open_files"].is_null(), "{a}");
+    assert!(a["sockets"].is_null());
+    assert!(a["file_activity"].is_null());
+    let lab = Lab::new();
+    lab.write("lsof", json!({"stdout":"p123\0\nf4\0tREG\0\n"}));
+    let (out, a) = lab.run();
+    assert!(out.status.success());
+    assert!(a["open_files"].is_null());
+}
+
+#[test]
+fn filesystem_activity_resolves_initial_and_new_descriptors_and_forgets_closed_ones() {
+    let lab = Lab::new();
+    lab.write("process-owner", json!({"status":"available","data":0}));
+    lab.write("fs_usage",json!({"stdout":"12:00:00.000001 read F=4 B=0x10 0.000001 app.123\n12:00:00.000002 open F=9 /tmp/new file 0.000001 app.123\n12:00:00.000003 write F=9 B=0x20 0.000001 app.123\n12:00:00.000004 close F=9 0.000001 app.123\n12:00:00.000005 read F=9 B=0x10 0.000001 app.123\n"}));
+    let (out, a) = lab.run();
+    assert!(out.status.success(), "{a}");
+    assert_eq!(a["file_activity"][0]["path"], "/tmp/open file");
+    assert_eq!(a["file_activity"][1]["path"], "/tmp/new file");
+    assert!(a["file_activity"][2]["path"].is_null());
+}
+
+#[test]
+fn malformed_trace_diagnostics_and_scoped_ipv6_are_handled_without_invented_readings() {
+    let lab = Lab::new();
+    lab.write("process-owner", json!({"status":"available","data":0}));
+    lab.write(
+        "fs_usage",
+        json!({"stdout":"fs_usage: tracing is unavailable\n"}),
+    );
+    lab.write("lsof",json!({"stdout":"p123\0\nfcwd\0tDIR\0n/tmp\0\nf5\0tIPv6\0PUDP\0n[fe80::1%en0]:5000->[fe80::2%en0]:5353\0\n"}));
+    let (out, a) = lab.run();
+    assert!(out.status.success());
+    assert!(a["file_activity"].is_null(), "{a}");
+    assert_eq!(a["sockets"][0]["remote_ip"], "fe80::2%en0");
+    assert_eq!(a["sockets"][0]["remote_port"], 5353);
+}
+
+#[test]
+fn live_empty_argv_zero_never_causes_environment_to_be_parsed_as_an_argument() {
+    let child=Child(Command::new("/bin/bash").args(["-c","exec -a '' /bin/sh -c 'while :; do :; done'"])
+        .env_clear().env("PRIVATE_ENV_SENTINEL","PRIVATE_ENV_VALUE").spawn().unwrap());
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let out=Command::new(env!("CARGO_BIN_EXE_hostvitals")).args(["process",&child.0.id().to_string(),"--seconds","1"])
+        .env_remove("HOSTVITALS_PROBE_FIXTURES").output().unwrap();
+    assert!(out.status.success());
+    for bytes in [&out.stdout,&out.stderr] {
+        assert!(!String::from_utf8_lossy(bytes).contains("PRIVATE_ENV_SENTINEL"));
+        assert!(!String::from_utf8_lossy(bytes).contains("PRIVATE_ENV_VALUE"));
+    }
+    let a: Value=serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(a["command_line"][0],"");
+    assert_eq!(a["command_line"][1],"-c");
+    assert_eq!(a["command_line"][2],"while :; do :; done");
+}

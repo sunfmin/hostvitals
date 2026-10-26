@@ -321,7 +321,7 @@ fn energy_counters(
     }
     Ok(counters)
 }
-/// Discovery alone does not establish readability: doctor takes a real initial sample.
+/// Discovery and stale lifetime counters do not establish readability: CPU energy must advance.
 pub fn read() -> Reading<Channels> {
     Reading::from_result((|| {
         let window = Window::start(false)?;
@@ -334,12 +334,24 @@ pub fn read() -> Reading<Channels> {
         if sampled <= 0 {
             return Err("Energy Model subscription produced an empty sample".into());
         }
-        let counters = energy_counters(&window.library, window.before.0)?;
-        if !counters
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let power = window.delta()?;
+        let cpu = power
+            .energy
             .iter()
-            .any(|(name, value)| name.ends_with("CPU Energy") && *value > 0)
-        {
-            return Err("Energy Model CPU counters have no accumulated energy; channel enumeration and sampling do not establish readable power on this macOS".into());
+            .filter(|c| c.name.ends_with("CPU Energy"))
+            .try_fold(0.0, |sum, c| {
+                hostvitals_policy::energy::counter_watts(
+                    c.value,
+                    c.counter_before,
+                    c.counter_after,
+                    &c.unit,
+                    power.window_seconds,
+                )
+                .and_then(|v| hostvitals_policy::add_rates(Some(sum), Some(v)))
+            });
+        if !cpu.is_some_and(|watts| watts > 0.0) {
+            return Err("Energy Model CPU energy did not advance over the probe; stale lifetime counters and channel enumeration do not establish readable power on this macOS".into());
         }
         Ok(Channels {
             energy_channels: window.energy_channels,

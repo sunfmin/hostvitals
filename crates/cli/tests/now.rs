@@ -407,6 +407,28 @@ fn zero_accumulated_or_regressed_energy_counters_are_unknown_while_valid_idle_is
 }
 
 #[test]
+fn frozen_cpu_energy_never_appears_as_zero_watt_cpu_power() {
+    let rows = row(10, 501, "0:00.00", 1, "/App");
+    let lab = Lab::new(rows.clone(), rows);
+    lab.process(10, 10);
+    lab.write("now-power",json!({"status":"available","data":{"window_seconds":1.0,"energy":[
+        {"name":"CPU Energy","unit":"mJ","value":0,"counter_before":100,"counter_after":100},
+        {"name":"GPU Energy","unit":"mJ","value":10,"counter_before":100,"counter_after":110},
+        {"name":"ANE Energy","unit":"mJ","value":0,"counter_before":100,"counter_after":100}],"gpu_states":[["OFF",100]]}}));
+    let a = lab.answer();
+    assert!(a["host"]["power"]["cpu_watts"].is_null());
+    assert!(a["host"]["power"]["ane_watts"].is_null());
+    assert_eq!(a["host"]["power"]["gpu_watts"], 0.01);
+    assert!(
+        a["skipped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["measurement"] == "power.cpu_watts")
+    );
+}
+
+#[test]
 fn optional_energy_cli_failures_leave_cpu_memory_network_and_power_answered() {
     let rows = row(10, 501, "0:00.00", 1, "/App");
     let lab = Lab::new(rows.clone(), rows);

@@ -22,6 +22,15 @@ pub(crate) fn power(reading: Reading<ioreport::Power>, skipped: &mut Vec<Value>)
             }
             let mut answer = empty;
             answer["window_seconds"] = json!(data.window_seconds);
+            let cpu_counters: Vec<_> = data
+                .energy
+                .iter()
+                .filter(|c| c.name.ends_with("CPU Energy"))
+                .collect();
+            let cpu_stalled = !cpu_counters.is_empty()
+                && cpu_counters
+                    .iter()
+                    .all(|c| c.counter_before.is_some() && c.value == 0);
             for key in ["cpu_watts", "gpu_watts", "ane_watts"] {
                 let channels: Vec<_> = data
                     .energy
@@ -32,7 +41,7 @@ pub(crate) fn power(reading: Reading<ioreport::Power>, skipped: &mut Vec<Value>)
                         _ => c.name.starts_with("ANE"),
                     })
                     .collect();
-                let total = if channels.is_empty() {
+                let mut total = if channels.is_empty() {
                     None
                 } else {
                     channels.iter().try_fold(0.0, |sum, c| {
@@ -46,6 +55,10 @@ pub(crate) fn power(reading: Reading<ioreport::Power>, skipped: &mut Vec<Value>)
                         .and_then(|v| hostvitals_policy::add_rates(Some(sum), Some(v)))
                     })
                 };
+                if cpu_stalled && (key == "cpu_watts" || (key == "ane_watts" && total == Some(0.0)))
+                {
+                    total = None;
+                }
                 answer[key] = json!(total);
                 if total.is_none() {
                     power_skip(skipped, key);
@@ -61,7 +74,7 @@ pub(crate) fn power(reading: Reading<ioreport::Power>, skipped: &mut Vec<Value>)
     }
 }
 fn power_skip(skipped: &mut Vec<Value>, key: &str) {
-    skipped.push(json!({"measurement":format!("power.{key}"),"count":1,"reason":"IOReport channel absent or invalid: unknown unit, regressed/inconsistent counters, no accumulated energy in either sample (idle versus restricted is unknown), or invalid GPU residency","fix":"brew upgrade sunfmin/tap/hostvitals && hostvitals doctor && hostvitals now"}));
+    skipped.push(json!({"measurement":format!("power.{key}"),"count":1,"reason":"IOReport channel absent or invalid: unknown unit, regressed/inconsistent counters, no accumulated energy, CPU energy not advancing (zero ANE energy is also unverified while CPU counters stall), or invalid GPU residency","fix":"brew upgrade sunfmin/tap/hostvitals && hostvitals doctor && hostvitals now"}));
 }
 
 pub(crate) fn battery(skipped: &mut Vec<Value>) -> Value {

@@ -70,11 +70,17 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = crate::process::DEFAULT_SECONDS, value_parser = clap::value_parser!(u64).range(1..))]
         seconds: u64,
     },
-    /// Measures CPU, memory and network over one window for the host, every user's processes and their Apps.
+    /// Judges and measures CPU, memory and network over one window for the host, every user's processes and their Apps.
     ///
     /// Run `hostvitals now --seconds 3 --top 10`. Reads two all-user `ps` and `nettop` snapshots, cumulative host CPU ticks, memory sysctls, process responsibility, and accessible rusage footprints. Only reads; saves nothing. `--seconds` and `--top` require a whole number at least 1. Refusals name the corrected command. Missing or malformed process or host snapshots refuse with a retry line; optional native and network reads are null with a `skipped` entry.
     ///
-    /// Answers `source` (`host` or `fixtures`), `window_seconds` (actual monotonic time between process readings), `host`, `processes` (the entire final snapshot), `apps` (totals of those processes), `rankings` and `skipped`. Host CPU covers the same window with minor snapshot collection skew. CPU percentages for processes and Apps use one logical core as 100%, so multithreaded work can exceed 100%. Host percentages cover all cores and total 100%.
+    /// Answers `findings` before the raw sections. Other keys are `source` (`host` or `fixtures`), `window_seconds` (actual monotonic time between process readings), `host`, `processes` (the entire final snapshot), `apps` (totals of those processes), `rankings` and `skipped`. Host CPU covers the same window with minor snapshot collection skew. CPU percentages for processes and Apps use one logical core as 100%, so multithreaded work can exceed 100%. Host percentages cover all cores and total 100%.
+    ///
+    /// `findings` is [] when none of the fixed rules match. Each item has a stable `rule`, `subject`, `measured`, `threshold`, and `next_command` for the caller to run; now never executes that suggestion. A subject has `kind`: host or process. Process subjects also retain `pid`, `started_at` and `name` from the final snapshot. The rules judge every Process before --top limits Rankings; App sums do not create extra findings for these rules. Missing CPU baselines and zero denominators produce no corresponding finding, rather than measured zeroes. Ratios are judged with exact integer comparisons before any floating-point display conversion.
+    ///
+    /// Rules: `memory_pressure` means pressure at {const:FINDING_PRESSURE} or worse, ordered normal < warn < critical; measured has `pressure`, threshold has `comparison`: >= and `pressure`. `swap_used` means swap used > {const:FINDING_SWAP_PERCENT}% of total swap; measured has `used_bytes`, `total_bytes` and `percent`, threshold has `comparison`: > and `percent`. Both have a host subject and suggest `hostvitals now --top 20` to inspect the memory Rankings again.
+    ///
+    /// `process_resident` means Resident > {const:FINDING_RESIDENT_PERCENT}% of host memory; measured has `resident_bytes`, `host_memory_bytes` and `percent`, threshold has `comparison`: > and `percent`. It suggests `hostvitals memory PID`. Byte percentages derive from the same raw values in host.memory and processes. `process_cpu` means CPU >= {const:FINDING_CPU_CORES} core across the actual Window; measured has `cpu_hundredths` (cumulative CPU change in hundredths of a second), `window_nanoseconds` (exact integer elapsed time), `window_seconds` (that same duration in seconds), and `cpu_percent` (the same value as the Process record). Its threshold has `comparison`: >= and `cores`; it suggests `hostvitals profile PID`. CPU uses the same matching PID/start-time baseline and monotonic counter change as processes, never lifetime CPU or a rounded percentage. Process suggestions use the observed PID; a Process can exit or that PID can be reused before the caller runs them.
     ///
     /// `host.cpu` has `user_percent` (including nice), `system_percent`, `idle_percent`, `logical_cores` and `physical_cores`. `host.load_average` is the 1, 5 and 15 minute load. `host.memory` has `total_bytes`, `free_percent` (kern.memorystatus_level, not a resident-memory subtraction), `pressure` (normal, warn or critical), `swap_used_bytes`, `swap_total_bytes`, and `compressed_bytes` (physical compressed storage). Memory and load are read at the end of the window.
     ///
@@ -191,6 +197,22 @@ pub(crate) fn manual() -> Help {
         )
         .constant("MEASUREMENT_LIMIT_MIB", crate::tools::MEASUREMENT_LIMIT_MIB)
         .constant("MEMORY_DEFAULT_TOP", crate::memory::DEFAULT_TOP)
+        .constant(
+            "FINDING_PRESSURE",
+            hostvitals_policy::findings::memory_pressure_threshold().name(),
+        )
+        .constant(
+            "FINDING_SWAP_PERCENT",
+            hostvitals_policy::findings::SWAP_USED_PERCENT,
+        )
+        .constant(
+            "FINDING_RESIDENT_PERCENT",
+            hostvitals_policy::findings::PROCESS_RESIDENT_PERCENT,
+        )
+        .constant(
+            "FINDING_CPU_CORES",
+            hostvitals_policy::findings::PROCESS_CPU_CORES,
+        )
 }
 #[cfg(test)]
 mod tests {

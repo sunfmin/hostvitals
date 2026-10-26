@@ -45,10 +45,22 @@ impl Lab {
         );
         self.write(&format!("now-rusage-{pid}"),json!({"status":"available","data":{"resident_bytes":999,"footprint_bytes":1000,"peak_footprint_bytes":2000,"read_bytes":0,"written_bytes":0,"energy_nj":0}}));
     }
+    fn healthy_memory(&self, total_bytes: u64) {
+        for i in 0..2 {
+            let path = self.0.join(format!("now-host-{i}.json"));
+            let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            value["data"]["memory"] = json!({
+                "total_bytes":total_bytes, "free_percent":50, "pressure":"normal",
+                "swap_used_bytes":800, "swap_total_bytes":1000, "compressed_bytes":0
+            });
+            fs::write(path, value.to_string()).unwrap();
+        }
+    }
     fn run(&self, args: &[&str]) -> std::process::Output {
         Command::new(env!("CARGO_BIN_EXE_hostvitals"))
             .args(args)
             .env("HOSTVITALS_PROBE_FIXTURES", &self.0)
+            .env("TMPDIR", &self.0)
             .env("PATH", self.0.join("bin"))
             .output()
             .unwrap()
@@ -74,6 +86,168 @@ fn row(pid: u32, uid: u32, cpu: &str, rss: u64, name: &str) -> String {
         "{pid} 1 {uid} {} {cpu} {rss} Mon Oct 12 17:34:33 2026 {name}\n",
         if uid == 0 { "root" } else { "owner" }
     )
+}
+
+#[test]
+fn healthy_findings_are_first_and_app_sums_do_not_create_process_findings() {
+    let before = row(10, 501, "1000:00.00", 1, "/App") + &row(11, 501, "1000:00.00", 1, "/helper");
+    let after = row(10, 501, "1000:00.60", 1, "/App") + &row(11, 501, "1000:00.60", 1, "/helper");
+    let lab = Lab::new(before, after);
+    lab.healthy_memory(10240);
+    lab.process(10, 10);
+    lab.process(11, 10);
+    let out = lab.run(&["now", "--seconds", "1", "--top", "1"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).starts_with("{\"findings\":[],"));
+    let a: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(a["findings"], json!([]));
+    assert_eq!(a["skipped"], json!([]));
+    assert_eq!(a["apps"][0]["resident_bytes"], 2048);
+    let window = a["window_seconds"].as_f64().unwrap();
+    assert!((a["apps"][0]["cpu_percent"].as_f64().unwrap() * window - 120.0).abs() < 0.001);
+}
+
+#[test]
+fn sustained_cpu_and_resident_findings_cover_processes_outside_rankings() {
+    let before = row(10, 501, "1000:00.00", 300, "/App")
+        + &row(20, 501, "2000:00.00", 200, "/helper")
+        + &row(30, 501, "0:00.00", 1, "/brief work");
+    let after = row(10, 501, "1010:00.00", 300, "/App")
+        + &row(20, 501, "2005:00.00", 200, "/helper")
+        + &row(30, 501, "0:01.00", 1, "/brief work");
+    let lab = Lab::new(before, after);
+    lab.healthy_memory(1024000);
+    for pid in [10, 20, 30] {
+        lab.process(pid, 10);
+    }
+    lab.write(
+        "nettop",
+        json!({"delay_ms":200,"stdout":",bytes_in,bytes_out,\n"}),
+    );
+    let standin = fs::read_link(lab.0.join("bin/ps")).unwrap();
+    std::os::unix::fs::symlink(standin, lab.0.join("bin/sample")).unwrap();
+    lab.write(
+        "sample",
+        json!({"report":include_str!("../../policy/tests/fixtures/sample-busy.txt"),"calls":[]}),
+    );
+    let out = lab.run(&["now", "--seconds", "1", "--top", "1"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.starts_with("{\"findings\":"));
+    let a: Value = serde_json::from_str(&text).unwrap();
+    let window = a["window_seconds"].as_f64().unwrap();
+    assert!(
+        window >= 1.4,
+        "collection delay belongs to the actual Window"
+    );
+    assert!(a["processes"][2]["cpu_percent"].as_f64().unwrap() < 100.0);
+    let findings = a["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 4, "{findings:?}");
+    for (i, (pid, resident, percent, hundredths, name)) in [
+        (10, 307200, 30.0, 60000, "App"),
+        (20, 204800, 20.0, 30000, "helper"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let subject = json!({"kind":"process", "pid":pid, "started_at":"Mon Oct 12 17:34:33 2026", "name":name});
+        assert_eq!(
+            findings[i * 2],
+            json!({
+                "rule":"process_resident", "subject":subject,
+                "measured":{"resident_bytes":resident,"host_memory_bytes":1024000,"percent":percent},
+                "threshold":{"comparison":">","percent":10},
+                "next_command":format!("hostvitals memory {pid}")
+            })
+        );
+        let cpu = &findings[i * 2 + 1];
+        assert_eq!(cpu["rule"], "process_cpu");
+        assert_eq!(cpu["subject"], subject);
+        assert_eq!(cpu["threshold"], json!({"comparison":">=","cores":1}));
+        assert_eq!(cpu["next_command"], format!("hostvitals profile {pid}"));
+        assert_eq!(cpu["measured"]["cpu_hundredths"], hundredths);
+        assert_eq!(cpu["measured"]["window_seconds"], a["window_seconds"]);
+        let nanos = cpu["measured"]["window_nanoseconds"].as_u64().unwrap();
+        assert!((nanos as f64 / 1e9 - window).abs() < 1e-9);
+        let reported = cpu["measured"]["cpu_percent"].as_f64().unwrap();
+        assert!(reported >= 100.0);
+        assert!((reported * window - hundredths as f64).abs() < 0.001);
+        assert_eq!(
+            cpu["measured"]["cpu_percent"],
+            a["processes"][i]["cpu_percent"]
+        );
+    }
+    for key in ["processes_by_cpu", "processes_by_memory"] {
+        assert_eq!(a["rankings"][key].as_array().unwrap().len(), 1);
+        assert_eq!(a["rankings"][key][0]["pid"], 10);
+    }
+    assert_eq!(a["apps"].as_array().unwrap().len(), 1);
+    let sample: Value =
+        serde_json::from_slice(&fs::read(lab.0.join("sample.json")).unwrap()).unwrap();
+    assert_eq!(
+        sample["calls"],
+        json!([]),
+        "now only suggests investigation"
+    );
+    let next: Vec<_> = findings[3]["next_command"]
+        .as_str()
+        .unwrap()
+        .split_whitespace()
+        .collect();
+    let out = lab.run(&next[1..]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let profile: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(profile["pid"], 20);
+    assert_eq!(profile["status"], "available");
+    assert_eq!(profile["total_samples"], 200);
+    assert!(PathBuf::from(profile["report_path"].as_str().unwrap()).is_file());
+}
+
+#[test]
+fn unmeasured_cpu_never_fabricates_findings_from_lifetime_or_zero_baselines() {
+    let before = row(10, 501, "1000:00.00", 1, "/old")
+        + &row(11, 501, "1000:00.00", 1, "/regressed")
+        + &row(13, 501, "1000:00.00", 1, "/idle");
+    let after = row(10, 501, "2000:00.00", 1, "/replacement").replace("Oct 12", "Oct 25")
+        + &row(11, 501, "500:00.00", 1, "/regressed")
+        + &row(12, 501, "1000:00.00", 1, "/new")
+        + &row(13, 501, "1000:00.00", 1, "/idle");
+    let lab = Lab::new(before, after);
+    lab.healthy_memory(1024000);
+    for pid in [10, 11, 12, 13] {
+        lab.process(pid, 13);
+    }
+    let a = lab.answer();
+    assert_eq!(a["findings"], json!([]));
+    for p in &a["processes"].as_array().unwrap()[..3] {
+        assert!(p["cpu_percent"].is_null(), "{p}");
+    }
+    assert_eq!(a["processes"][3]["cpu_percent"], 0.0);
+    assert!(a["apps"][0]["cpu_percent"].is_null());
+    assert_eq!(a["rankings"]["apps_by_cpu"], json!([]));
+    assert_eq!(
+        a["rankings"]["processes_by_cpu"].as_array().unwrap().len(),
+        1
+    );
+    assert!(
+        a["skipped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["measurement"] == "cpu_percent" && s["count"] == 3)
+    );
 }
 
 #[test]
@@ -166,29 +340,43 @@ fn now_measures_the_window_and_ranks_root_memory_and_responsible_apps() {
     }
     let a = lab.answer();
     assert_eq!(a["source"], "fixtures");
-    let findings = a["findings"].as_array().expect("now judges its observations");
+    let findings = a["findings"]
+        .as_array()
+        .expect("now judges its observations");
     assert_eq!(findings.len(), 3, "{findings:?}");
-    assert_eq!(findings[0], json!({
-        "rule":"memory_pressure", "subject":{"kind":"host"},
-        "measured":{"pressure":"warn"},
-        "threshold":{"comparison":">=","pressure":"warn"},
-        "next_command":"hostvitals now --top 20"
-    }));
+    assert_eq!(
+        findings[0],
+        json!({
+            "rule":"memory_pressure", "subject":{"kind":"host"},
+            "measured":{"pressure":"warn"},
+            "threshold":{"comparison":">=","pressure":"warn"},
+            "next_command":"hostvitals now --top 20"
+        })
+    );
     assert_eq!(findings[1]["rule"], "swap_used");
     assert_eq!(findings[1]["subject"], json!({"kind":"host"}));
     assert_eq!(findings[1]["measured"]["used_bytes"], 8568459428u64);
     assert_eq!(findings[1]["measured"]["total_bytes"], 9663676416u64);
     assert!((findings[1]["measured"]["percent"].as_f64().unwrap() - 88.66666327748).abs() < 1e-9);
-    assert_eq!(findings[1]["threshold"], json!({"comparison":">","percent":80}));
+    assert_eq!(
+        findings[1]["threshold"],
+        json!({"comparison":">","percent":80})
+    );
     assert_eq!(findings[1]["next_command"], "hostvitals now --top 20");
     assert_eq!(findings[2]["rule"], "process_resident");
-    assert_eq!(findings[2]["subject"], json!({
-        "kind":"process","pid":100,"started_at":"Mon Oct 12 17:34:33 2026","name":"fseventsd"
-    }));
+    assert_eq!(
+        findings[2]["subject"],
+        json!({
+            "kind":"process","pid":100,"started_at":"Mon Oct 12 17:34:33 2026","name":"fseventsd"
+        })
+    );
     assert_eq!(findings[2]["measured"]["resident_bytes"], 10630043648u64);
     assert_eq!(findings[2]["measured"]["host_memory_bytes"], 51539607552u64);
     assert!((findings[2]["measured"]["percent"].as_f64().unwrap() - 20.624999205271).abs() < 1e-9);
-    assert_eq!(findings[2]["threshold"], json!({"comparison":">","percent":10}));
+    assert_eq!(
+        findings[2]["threshold"],
+        json!({"comparison":">","percent":10})
+    );
     assert_eq!(findings[2]["next_command"], "hostvitals memory 100");
     assert_eq!(a["processes"].as_array().unwrap().len(), 33);
     assert_eq!(a["host"]["cpu"]["user_percent"], 30.0);
@@ -265,6 +453,20 @@ fn now_rejects_invalid_limits_and_explains_every_answer_key() {
     assert!(out.status.success());
     let help = String::from_utf8(out.stdout).unwrap();
     for key in [
+        "findings",
+        "rule",
+        "subject",
+        "kind",
+        "measured",
+        "threshold",
+        "comparison",
+        "percent",
+        "next_command",
+        "used_bytes",
+        "host_memory_bytes",
+        "cpu_hundredths",
+        "window_nanoseconds",
+        "cores",
         "source",
         "window_seconds",
         "host",
@@ -316,6 +518,19 @@ fn now_rejects_invalid_limits_and_explains_every_answer_key() {
     ] {
         assert!(help.contains(key), "missing {key}: {help}");
     }
+    use hostvitals_policy::findings;
+    for rule in [
+        format!(
+            "pressure at {} or worse",
+            findings::memory_pressure_threshold().name()
+        ),
+        format!("swap used > {}%", findings::SWAP_USED_PERCENT),
+        format!("Resident > {}%", findings::PROCESS_RESIDENT_PERCENT),
+        format!("CPU >= {} core", findings::PROCESS_CPU_CORES),
+    ] {
+        assert!(help.contains(&rule), "missing {rule}: {help}");
+    }
+    assert!(!help.contains("{const:"));
 }
 
 #[test]

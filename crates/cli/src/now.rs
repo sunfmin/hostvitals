@@ -12,6 +12,14 @@ use std::{
     time::{Duration, Instant},
 };
 
+// Struct field order keeps judgements before the raw sections, even though Value sorts keys.
+#[derive(Serialize)]
+pub(crate) struct Answer {
+    findings: Vec<Value>,
+    #[serde(flatten)]
+    measurements: Value,
+}
+
 #[derive(Serialize)]
 struct Process {
     pid: u32,
@@ -21,6 +29,8 @@ struct Process {
     name: String,
     started_at: String,
     cpu_percent: Option<f64>,
+    #[serde(skip)]
+    cpu_hundredths: Option<u64>,
     resident_bytes: u64,
     footprint_bytes: Option<u64>,
     peak_footprint_bytes: Option<u64>,
@@ -54,7 +64,7 @@ impl Network {
     }
 }
 
-pub fn answer(source: &Source, seconds: NonZeroU64, top: NonZeroUsize) -> Result<Value, String> {
+pub fn answer(source: &Source, seconds: NonZeroU64, top: NonZeroUsize) -> Result<Answer, String> {
     let before = ps::snapshot()?;
     let start = Instant::now();
     let host_before = host(source, 0)?;
@@ -65,7 +75,8 @@ pub fn answer(source: &Source, seconds: NonZeroU64, top: NonZeroUsize) -> Result
     let network_seconds = network_start.elapsed().as_secs_f64();
     let host_after = host(source, 1)?;
     let after = ps::snapshot()?;
-    let window = start.elapsed().as_secs_f64();
+    let elapsed = start.elapsed();
+    let window = elapsed.as_secs_f64();
     let mut skipped = Vec::new();
     let mut processes = Vec::new();
     let mut foreign = 0;
@@ -104,16 +115,14 @@ pub fn answer(source: &Source, seconds: NonZeroU64, top: NonZeroUsize) -> Result
         }
     }
     for p in after.values() {
-        let cpu_percent = before
-            .get(&p.pid)
-            .and_then(|old| {
-                policy::counter_delta(
-                    old.cpu_hundredths,
-                    p.cpu_hundredths,
-                    old.started_at == p.started_at,
-                )
-            })
-            .map(|delta| policy::cpu_percent(delta, window));
+        let cpu_hundredths = before.get(&p.pid).and_then(|old| {
+            policy::counter_delta(
+                old.cpu_hundredths,
+                p.cpu_hundredths,
+                old.started_at == p.started_at,
+            )
+        });
+        let cpu_percent = cpu_hundredths.map(|delta| policy::cpu_percent(delta, window));
         if cpu_percent.is_none() {
             missing_cpu += 1;
         }
@@ -159,6 +168,7 @@ pub fn answer(source: &Source, seconds: NonZeroU64, top: NonZeroUsize) -> Result
             name: p.name.clone(),
             started_at: p.started_at.clone(),
             cpu_percent,
+            cpu_hundredths,
             resident_bytes: p.resident_bytes,
             footprint_bytes,
             peak_footprint_bytes,
@@ -213,6 +223,67 @@ pub fn answer(source: &Source, seconds: NonZeroU64, top: NonZeroUsize) -> Result
     for (reason, count) in app_errors {
         skipped.push(json!({"measurement":"app_pid","count":count,"reason":reason,"fix":"brew upgrade sunfmin/tap/hostvitals && hostvitals doctor"}));
     }
+    let pressure = match host_after.memory.pressure.as_str() {
+        "normal" => policy::findings::Pressure::Normal,
+        "warn" => policy::findings::Pressure::Warn,
+        "critical" => policy::findings::Pressure::Critical,
+        unknown => {
+            return Err(format!(
+                "unknown memory pressure {unknown}; run hostvitals doctor && hostvitals now"
+            ));
+        }
+    };
+    let observations: Vec<_> = processes
+        .iter()
+        .map(|p| policy::findings::Process {
+            pid: p.pid,
+            resident_bytes: p.resident_bytes,
+            cpu_hundredths: p.cpu_hundredths,
+        })
+        .collect();
+    let judgements = policy::findings::judge(
+        &policy::findings::Host {
+            pressure,
+            memory_bytes: host_after.memory.total_bytes,
+            swap_used_bytes: host_after.memory.swap_used_bytes,
+            swap_total_bytes: host_after.memory.swap_total_bytes,
+        },
+        &observations,
+        elapsed.as_nanos(),
+    );
+    let process_subject = |pid| {
+        let p = &after[&pid];
+        json!({"kind":"process", "pid":p.pid, "started_at":p.started_at, "name":p.name})
+    };
+    let findings = judgements.into_iter().map(|finding| {
+        use policy::findings::{self, Finding};
+        match finding {
+            Finding::MemoryPressure { pressure } => json!({
+                "rule":"memory_pressure", "subject":{"kind":"host"},
+                "measured":{"pressure":pressure.name()},
+                "threshold":{"comparison":">=", "pressure":findings::memory_pressure_threshold().name()},
+                "next_command":"hostvitals now --top 20"
+            }),
+            Finding::SwapUsed { used_bytes, total_bytes } => json!({
+                "rule":"swap_used", "subject":{"kind":"host"},
+                "measured":{"used_bytes":used_bytes, "total_bytes":total_bytes, "percent":used_bytes as f64 / total_bytes as f64 * 100.0},
+                "threshold":{"comparison":">", "percent":findings::SWAP_USED_PERCENT},
+                "next_command":"hostvitals now --top 20"
+            }),
+            Finding::ProcessResident { pid, resident_bytes, total_bytes } => json!({
+                "rule":"process_resident", "subject":process_subject(pid),
+                "measured":{"resident_bytes":resident_bytes, "host_memory_bytes":total_bytes, "percent":resident_bytes as f64 / total_bytes as f64 * 100.0},
+                "threshold":{"comparison":">", "percent":findings::PROCESS_RESIDENT_PERCENT},
+                "next_command":format!("hostvitals memory {pid}")
+            }),
+            Finding::ProcessCpu { pid, cpu_hundredths, window_nanoseconds } => json!({
+                "rule":"process_cpu", "subject":process_subject(pid),
+                "measured":{"cpu_hundredths":cpu_hundredths, "window_nanoseconds":window_nanoseconds, "window_seconds":window, "cpu_percent":policy::cpu_percent(cpu_hundredths, window)},
+                "threshold":{"comparison":">=", "cores":findings::PROCESS_CPU_CORES},
+                "next_command":format!("hostvitals profile {pid}")
+            }),
+        }
+    }).collect();
     let usages: Vec<_> = processes
         .iter()
         .map(|p| policy::apps::ProcessUsage {
@@ -295,39 +366,42 @@ pub fn answer(source: &Source, seconds: NonZeroU64, top: NonZeroUsize) -> Result
     if total == 0.0 {
         return Err("host CPU ticks did not advance; run hostvitals now --seconds 3".into());
     }
-    Ok(json!({
-        "source": if source.0.is_some() { "fixtures" } else { "host" },
-        "window_seconds": window,
-        "host": {
-            "cpu": {
-                "user_percent": (ticks[0] + ticks[3]) as f64 / total * 100.0,
-                "system_percent": ticks[1] as f64 / total * 100.0,
-                "idle_percent": ticks[2] as f64 / total * 100.0,
-                "logical_cores": host_after.logical_cores,
-                "physical_cores": host_after.physical_cores
+    Ok(Answer {
+        findings,
+        measurements: json!({
+            "source": if source.0.is_some() { "fixtures" } else { "host" },
+            "window_seconds": window,
+            "host": {
+                "cpu": {
+                    "user_percent": (ticks[0] + ticks[3]) as f64 / total * 100.0,
+                    "system_percent": ticks[1] as f64 / total * 100.0,
+                    "idle_percent": ticks[2] as f64 / total * 100.0,
+                    "logical_cores": host_after.logical_cores,
+                    "physical_cores": host_after.physical_cores
+                },
+                "load_average": host_after.load_average,
+                "memory": host_after.memory,
+                "network": {
+                    "window_seconds": if network_before.is_ok() && network_after.is_ok() { Some(network_seconds) } else { None },
+                    "bytes_in_per_second": policy::network::per_second(host_network.bytes_in, network_seconds),
+                    "bytes_out_per_second": policy::network::per_second(host_network.bytes_out, network_seconds)
+                }
             },
-            "load_average": host_after.load_average,
-            "memory": host_after.memory,
-            "network": {
-                "window_seconds": if network_before.is_ok() && network_after.is_ok() { Some(network_seconds) } else { None },
-                "bytes_in_per_second": policy::network::per_second(host_network.bytes_in, network_seconds),
-                "bytes_out_per_second": policy::network::per_second(host_network.bytes_out, network_seconds)
-            }
-        },
-        "processes": processes,
-        "apps": apps,
-        "rankings": {
-            "processes_by_cpu": process_cpu,
-            "processes_by_memory": process_memory,
-            "apps_by_cpu": app_cpu,
-            "apps_by_memory": app_memory,
-            "processes_by_network_in": process_in,
-            "processes_by_network_out": process_out,
-            "apps_by_network_in": app_in,
-            "apps_by_network_out": app_out
-        },
-        "skipped": skipped
-    }))
+            "processes": processes,
+            "apps": apps,
+            "rankings": {
+                "processes_by_cpu": process_cpu,
+                "processes_by_memory": process_memory,
+                "apps_by_cpu": app_cpu,
+                "apps_by_memory": app_memory,
+                "processes_by_network_in": process_in,
+                "processes_by_network_out": process_out,
+                "apps_by_network_in": app_in,
+                "apps_by_network_out": app_out
+            },
+            "skipped": skipped
+        }),
+    })
 }
 
 fn ranked<T>(

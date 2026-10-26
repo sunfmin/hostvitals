@@ -81,3 +81,48 @@ fn cpu_requires_at_least_one_core_across_the_actual_window() {
         );
     }
 }
+
+#[test]
+fn zero_denominators_and_extreme_counters_never_overflow_or_invent_ratios() {
+    use hostvitals_policy::findings::Process;
+    let mut h = Host {
+        pressure: Pressure::Normal,
+        memory_bytes: 0,
+        swap_used_bytes: u64::MAX,
+        swap_total_bytes: 0,
+    };
+    let processes = [Process {
+        pid: 42,
+        resident_bytes: u64::MAX,
+        cpu_hundredths: Some(u64::MAX),
+    }];
+    assert!(judge(&h, &processes, 0).is_empty());
+    assert!(judge(&h, &processes, u128::MAX).is_empty());
+    h.memory_bytes = u64::MAX;
+    h.swap_total_bytes = u64::MAX;
+    let findings = judge(&h, &processes, u128::MAX);
+    assert!(matches!(
+        findings.as_slice(),
+        [
+            Finding::SwapUsed {
+                used_bytes: u64::MAX,
+                total_bytes: u64::MAX
+            },
+            Finding::ProcessResident {
+                pid: 42,
+                resident_bytes: u64::MAX,
+                total_bytes: u64::MAX
+            }
+        ]
+    ));
+    h.swap_used_bytes = 0;
+    h.memory_bytes = 0;
+    assert!(matches!(
+        judge(&h, &processes, 1).as_slice(),
+        [Finding::ProcessCpu {
+            pid: 42,
+            cpu_hundredths: u64::MAX,
+            window_nanoseconds: 1
+        }]
+    ));
+}

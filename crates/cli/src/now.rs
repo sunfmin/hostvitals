@@ -1,7 +1,7 @@
 //! One observation window, retaining missing measurements rather than manufacturing zeroes.
 use crate::{
     direct::{self, Reading, Source},
-    tools::{nettop, ps},
+    tools::{df, ioreg, nettop, ps},
 };
 use hostvitals_policy as policy;
 use serde::Serialize;
@@ -36,6 +36,7 @@ struct Process {
     peak_footprint_bytes: Option<u64>,
     app_pid: Option<u32>,
     network: Network,
+    disk: ProcessDisk,
 }
 #[derive(Serialize)]
 struct App {
@@ -48,6 +49,25 @@ struct App {
     footprint_bytes: Option<u64>,
     peak_footprint_bytes: Option<u64>,
     network: Network,
+    disk: Disk,
+}
+
+#[derive(Serialize)]
+struct Disk {
+    read_bytes: Option<u64>,
+    written_bytes: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct ProcessDisk {
+    read_bytes: Option<u64>,
+    written_bytes: Option<u64>,
+    window_seconds: Option<f64>,
+}
+
+struct Usage {
+    reading: Reading<direct::rusage::Counters>,
+    at: Instant,
 }
 
 #[derive(Serialize)]
@@ -68,16 +88,51 @@ pub fn answer(source: &Source, seconds: NonZeroU64, top: NonZeroUsize) -> Result
     let before = ps::snapshot()?;
     let start = Instant::now();
     let host_before = host(source, 0)?;
+    let usage_before = usages(source, &before, host_before.euid, true);
     let network_before = nettop::snapshot();
     let network_start = Instant::now();
+    let disk_before = ioreg::snapshot();
+    let disk_start = Instant::now();
     std::thread::sleep(Duration::from_secs(seconds.get()));
+    let disk_after = ioreg::snapshot();
+    let disk_seconds = disk_start.elapsed().as_secs_f64();
     let network_after = nettop::snapshot();
     let network_seconds = network_start.elapsed().as_secs_f64();
     let host_after = host(source, 1)?;
     let after = ps::snapshot()?;
     let elapsed = start.elapsed();
     let window = elapsed.as_secs_f64();
+    let usage_after = usages(source, &after, host_after.euid, false);
     let mut skipped = Vec::new();
+    let disk_reading = match (&disk_before, &disk_after) {
+        (Ok(before), Ok(after)) => policy::disk::host_change(before, after).map_err(str::to_owned),
+        _ => Err([disk_before.as_ref().err(), disk_after.as_ref().err()]
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("; ")),
+    };
+    let host_disk = match disk_reading {
+        Ok(change) => {
+            for (field, missing) in [
+                ("read_bytes_per_second", change.read_bytes.is_none()),
+                ("written_bytes_per_second", change.written_bytes.is_none()),
+            ] {
+                if missing {
+                    skipped.push(json!({"measurement":format!("host.disk.{field}"),"count":1,"reason":"missing or invalid byte counter, regression, or checked total overflow","fix":"hostvitals doctor && hostvitals now --seconds 3"}));
+                }
+            }
+            change
+        }
+        Err(reason) => {
+            skipped.push(json!({"measurement":"host.disk","count":1,"reason":reason,"fix":"PATH=/usr/bin:/bin:/usr/sbin:/sbin:$PATH hostvitals doctor && hostvitals now"}));
+            policy::disk::Change {
+                read_bytes: None,
+                written_bytes: None,
+            }
+        }
+    };
     let mut processes = Vec::new();
     let mut foreign = 0;
     let mut missing_cpu = 0;
@@ -128,20 +183,35 @@ pub fn answer(source: &Source, seconds: NonZeroU64, top: NonZeroUsize) -> Result
         }
         let (footprint_bytes, peak_footprint_bytes) =
             if policy::may_read_footprint(host_after.euid, p.uid) {
-                match source.read(&format!("now-rusage-{}", p.pid), || {
-                    direct::rusage::read_pid(p.pid)
-                }) {
+                match &usage_after[&p.pid].reading {
                     Reading::Available { data } => {
                         (Some(data.footprint_bytes), Some(data.peak_footprint_bytes))
                     }
                     Reading::Unavailable { reason } => {
-                        *usage_errors.entry(reason).or_default() += 1;
+                        *usage_errors.entry(reason.clone()).or_default() += 1;
                         (None, None)
                     }
                 }
             } else {
                 foreign += 1;
                 (None, None)
+            };
+        let same_process = before
+            .get(&p.pid)
+            .is_some_and(|old| old.started_at == p.started_at && old.uid == p.uid);
+        let old = usage_before.get(&p.pid);
+        let new = usage_after.get(&p.pid);
+        let disk = policy::disk::process_change(
+            usage_counters(old).as_ref(),
+            usage_counters(new).as_ref(),
+            same_process,
+        );
+        let disk_window_seconds =
+            if same_process && usage_counters(old).is_some() && usage_counters(new).is_some() {
+                old.zip(new)
+                    .map(|(old, new)| new.at.duration_since(old.at).as_secs_f64())
+            } else {
+                None
             };
         let app_pid = match source.read(&format!("now-responsibility-{}", p.pid), || {
             direct::responsibility::read_pid(p.pid)
@@ -173,6 +243,11 @@ pub fn answer(source: &Source, seconds: NonZeroU64, top: NonZeroUsize) -> Result
             footprint_bytes,
             peak_footprint_bytes,
             app_pid,
+            disk: ProcessDisk {
+                read_bytes: disk.read_bytes,
+                written_bytes: disk.written_bytes,
+                window_seconds: disk_window_seconds,
+            },
             network: Network::new(
                 network_changes
                     .get(&p.pid)
@@ -213,6 +288,41 @@ pub fn answer(source: &Source, seconds: NonZeroU64, top: NonZeroUsize) -> Result
     }
     if foreign > 0 {
         skipped.push(json!({"measurement":"footprint","count":foreign,"reason":"other users' footprint and lifetime peak require root; CPU and resident memory are included","fix":"sudo hostvitals now"}));
+        skipped.push(json!({"measurement":"disk","count":foreign,"reason":"other users' rusage disk counters require root; CPU and resident memory are included","fix":"sudo hostvitals now"}));
+    }
+    for (field, missing) in [
+        (
+            "read_bytes",
+            processes
+                .iter()
+                .filter(|p| {
+                    policy::may_read_footprint(host_after.euid, p.uid)
+                        && p.disk.read_bytes.is_none()
+                })
+                .count(),
+        ),
+        (
+            "written_bytes",
+            processes
+                .iter()
+                .filter(|p| {
+                    policy::may_read_footprint(host_after.euid, p.uid)
+                        && p.disk.written_bytes.is_none()
+                })
+                .count(),
+        ),
+    ] {
+        if missing > 0 {
+            let reasons: BTreeSet<_> = usage_before
+                .values()
+                .chain(usage_after.values())
+                .filter_map(|u| match &u.reading {
+                    Reading::Unavailable { reason } => Some(reason.clone()),
+                    _ => None,
+                })
+                .collect();
+            skipped.push(json!({"measurement":format!("disk.{field}"),"count":missing,"reason":format!("no matching PID/start time and owner, missing rusage reading, or regressed counter; {}",reasons.into_iter().collect::<Vec<_>>().join("; ")),"fix":"hostvitals doctor && hostvitals now --seconds 3"}));
+        }
     }
     if missing_cpu > 0 {
         skipped.push(json!({"measurement":"cpu_percent","count":missing_cpu,"reason":"no matching initial PID and start time, or cumulative CPU counter regressed","fix":"hostvitals now"}));
@@ -255,7 +365,7 @@ pub fn answer(source: &Source, seconds: NonZeroU64, top: NonZeroUsize) -> Result
         let p = &after[&pid];
         json!({"kind":"process", "pid":p.pid, "started_at":p.started_at, "name":p.name})
     };
-    let findings = judgements.into_iter().map(|finding| {
+    let mut findings: Vec<Value> = judgements.into_iter().map(|finding| {
         use policy::findings::{self, Finding};
         match finding {
             Finding::MemoryPressure { pressure } => json!({
@@ -284,6 +394,24 @@ pub fn answer(source: &Source, seconds: NonZeroU64, top: NonZeroUsize) -> Result
             }),
         }
     }).collect();
+    let volumes = match df::snapshot() {
+        Ok(volumes) => {
+            let unavailable = volumes.iter().filter(|v| v.free_share.is_none()).count();
+            if unavailable > 0 {
+                skipped.push(json!({"measurement":"volumes","count":unavailable,"reason":"volume capacity or available bytes unknown, invalid, overflowed or zero capacity; no free-space ratio can be judged","fix":"df -a -l -k -P && hostvitals now"}));
+            }
+            for v in &volumes {
+                if policy::disk::low_free(v.size_bytes, v.free_bytes) {
+                    findings.push(json!({"rule":"volume_free","subject":{"kind":"volume","filesystem":v.filesystem,"mount_point":v.mount_point},"measured":{"size_bytes":v.size_bytes,"free_bytes":v.free_bytes,"free_share":v.free_share},"threshold":{"comparison":"<","percent":policy::disk::VOLUME_FREE_PERCENT},"next_command":"diskreap scan"}));
+                }
+            }
+            Some(volumes)
+        }
+        Err(reason) => {
+            skipped.push(json!({"measurement":"volumes","count":1,"reason":reason,"fix":"PATH=/usr/bin:/bin:/usr/sbin:/sbin:$PATH df -a -l -k -P && hostvitals now"}));
+            None
+        }
+    };
     let usages: Vec<_> = processes
         .iter()
         .map(|p| policy::apps::ProcessUsage {
@@ -294,6 +422,8 @@ pub fn answer(source: &Source, seconds: NonZeroU64, top: NonZeroUsize) -> Result
             peak_footprint_bytes: p.peak_footprint_bytes,
             bytes_in_per_second: p.network.bytes_in_per_second,
             bytes_out_per_second: p.network.bytes_out_per_second,
+            disk_read_bytes: p.disk.read_bytes,
+            disk_written_bytes: p.disk.written_bytes,
         })
         .collect();
     let apps: Vec<_> = policy::apps::summarize(&usages)
@@ -309,6 +439,10 @@ pub fn answer(source: &Source, seconds: NonZeroU64, top: NonZeroUsize) -> Result
                 resident_bytes: app.resident_bytes,
                 footprint_bytes: app.footprint_bytes,
                 peak_footprint_bytes: app.peak_footprint_bytes,
+                disk: Disk {
+                    read_bytes: app.disk_read_bytes,
+                    written_bytes: app.disk_written_bytes,
+                },
                 network: Network {
                     bytes_in_per_second: app.bytes_in_per_second,
                     bytes_out_per_second: app.bytes_out_per_second,
@@ -316,6 +450,42 @@ pub fn answer(source: &Source, seconds: NonZeroU64, top: NonZeroUsize) -> Result
             }
         })
         .collect();
+    for (field, count) in [
+        (
+            "read_bytes",
+            apps.iter().filter(|a| a.disk.read_bytes.is_none()).count(),
+        ),
+        (
+            "written_bytes",
+            apps.iter()
+                .filter(|a| a.disk.written_bytes.is_none())
+                .count(),
+        ),
+    ] {
+        if count > 0 {
+            skipped.push(json!({"measurement":format!("apps.disk.{field}"),"count":count,"reason":"a contributing Process was unmeasured or the checked App byte sum overflowed","fix":"sudo hostvitals now --seconds 3"}));
+        }
+    }
+    let process_writes: Vec<_> = policy::disk::rank_written(
+        &processes
+            .iter()
+            .map(|p| (p.pid, p.disk.written_bytes))
+            .collect::<Vec<_>>(),
+        top.get(),
+    )
+    .into_iter()
+    .filter_map(|pid| processes.iter().find(|p| p.pid == pid))
+    .collect();
+    let app_writes: Vec<_> = policy::disk::rank_written(
+        &apps
+            .iter()
+            .map(|a| (a.app_pid, a.disk.written_bytes))
+            .collect::<Vec<_>>(),
+        top.get(),
+    )
+    .into_iter()
+    .filter_map(|pid| apps.iter().find(|a| a.app_pid == pid))
+    .collect();
     let process_cpu = ranked(&processes, top.get(), |p| p.cpu_percent, |p| p.pid);
     let process_in = ranked(
         &processes,
@@ -380,6 +550,11 @@ pub fn answer(source: &Source, seconds: NonZeroU64, top: NonZeroUsize) -> Result
                     "physical_cores": host_after.physical_cores
                 },
                 "load_average": host_after.load_average,
+                "disk": {
+                    "window_seconds": if disk_before.is_ok() && disk_after.is_ok() { Some(disk_seconds) } else { None },
+                    "read_bytes_per_second": policy::network::per_second(host_disk.read_bytes, disk_seconds),
+                    "written_bytes_per_second": policy::network::per_second(host_disk.written_bytes, disk_seconds)
+                },
                 "memory": host_after.memory,
                 "network": {
                     "window_seconds": if network_before.is_ok() && network_after.is_ok() { Some(network_seconds) } else { None },
@@ -389,6 +564,7 @@ pub fn answer(source: &Source, seconds: NonZeroU64, top: NonZeroUsize) -> Result
             },
             "processes": processes,
             "apps": apps,
+            "volumes": volumes,
             "rankings": {
                 "processes_by_cpu": process_cpu,
                 "processes_by_memory": process_memory,
@@ -397,11 +573,50 @@ pub fn answer(source: &Source, seconds: NonZeroU64, top: NonZeroUsize) -> Result
                 "processes_by_network_in": process_in,
                 "processes_by_network_out": process_out,
                 "apps_by_network_in": app_in,
-                "apps_by_network_out": app_out
+                "apps_by_network_out": app_out,
+                "processes_by_disk_written": process_writes,
+                "apps_by_disk_written": app_writes
             },
             "skipped": skipped
         }),
     })
+}
+
+fn usages(
+    source: &Source,
+    processes: &BTreeMap<u32, ps::SnapshotProcess>,
+    euid: u32,
+    baseline: bool,
+) -> BTreeMap<u32, Usage> {
+    processes
+        .values()
+        .filter(|p| policy::may_read_footprint(euid, p.uid))
+        .map(|p| {
+            let name = if baseline {
+                format!("now-rusage-before-{}", p.pid)
+            } else {
+                format!("now-rusage-{}", p.pid)
+            };
+            let reading = source.read(&name, || direct::rusage::read_pid(p.pid));
+            (
+                p.pid,
+                Usage {
+                    reading,
+                    at: Instant::now(),
+                },
+            )
+        })
+        .collect()
+}
+
+fn usage_counters(usage: Option<&Usage>) -> Option<policy::disk::Counters> {
+    match &usage?.reading {
+        Reading::Available { data } => Some(policy::disk::Counters {
+            read_bytes: Some(data.read_bytes),
+            written_bytes: Some(data.written_bytes),
+        }),
+        Reading::Unavailable { .. } => None,
+    }
 }
 
 fn ranked<T>(

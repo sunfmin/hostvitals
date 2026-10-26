@@ -7,8 +7,10 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+pub(crate) mod df;
 pub(crate) mod footprint;
 pub(crate) mod fs_usage;
+pub(crate) mod ioreg;
 mod iostat;
 pub(crate) mod lsof;
 pub(crate) mod names;
@@ -29,8 +31,12 @@ pub enum Tool {
     Top,
     /// Per-process network counters; found on PATH.
     Nettop,
-    /// Disk I/O counters; found on PATH.
+    /// Combined disk I/O (does not verify directional rates); found on PATH.
     Iostat,
+    /// Directional block-storage byte counters, including virtual devices; found on PATH.
+    Ioreg,
+    /// Mounted local volumes' capacity and available space; found on PATH.
+    Df,
     /// Entitled call-stack sampling; found on PATH.
     Sample,
     /// Entitled memory-region inspection; found on PATH.
@@ -76,6 +82,8 @@ impl Tool {
             Self::Top => top::args(&pid),
             Self::Nettop => nettop::args(&pid),
             Self::Iostat => iostat::args(&pid),
+            Self::Ioreg => return ioreg::probe(path),
+            Self::Df => df::args(),
             Self::Sample => sample::args(&pid),
             Self::Vmmap => vmmap::args(&pid),
             Self::Footprint => footprint::args(&pid),
@@ -106,7 +114,7 @@ pub struct StandIn {
 pub(crate) fn capture(tool: Tool, args: Vec<&str>) -> Result<String, String> {
     let path = tool.find().ok_or("executable not found on PATH")?;
     execute(
-        Command::new(path).args(args),
+        Command::new(path).args(args).env("LC_ALL", "C"),
         MEASUREMENT_LIMIT_MIB * 1024 * 1024,
         Duration::from_secs(MEASUREMENT_TIMEOUT_SECONDS),
     )

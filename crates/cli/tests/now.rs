@@ -25,8 +25,16 @@ impl Lab {
         assert!(standin.exists(), "cargo build --example probe-cli first");
         std::os::unix::fs::symlink(&standin, lab.0.join("bin/ps")).unwrap();
         std::os::unix::fs::symlink(&standin, lab.0.join("bin/nettop")).unwrap();
+        for tool in ["ioreg", "df"] {
+            std::os::unix::fs::symlink(&standin, lab.0.join("bin").join(tool)).unwrap();
+        }
         lab.write("ps", json!({"stdout_readings":[before,after]}));
         lab.write("nettop", json!({"stdout":",bytes_in,bytes_out,\n"}));
+        lab.write(
+            "ioreg",
+            json!({"stdout":registry(&[(1, Some(100), Some(200))])}),
+        );
+        lab.write("df", json!({"stdout":"Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/disk1 1000 500 500 50% /\n"}));
         for (i, ticks) in [[100, 200, 300, 0], [130, 210, 360, 0]]
             .into_iter()
             .enumerate()
@@ -44,6 +52,7 @@ impl Lab {
             json!({"status":"available","data":{"pid":pid,"app_pid":app}}),
         );
         self.write(&format!("now-rusage-{pid}"),json!({"status":"available","data":{"resident_bytes":999,"footprint_bytes":1000,"peak_footprint_bytes":2000,"read_bytes":0,"written_bytes":0,"energy_nj":0}}));
+        self.write(&format!("now-rusage-before-{pid}"),json!({"status":"available","data":{"resident_bytes":999,"footprint_bytes":1000,"peak_footprint_bytes":2000,"read_bytes":0,"written_bytes":0,"energy_nj":0}}));
     }
     fn healthy_memory(&self, total_bytes: u64) {
         for i in 0..2 {
@@ -86,6 +95,466 @@ fn row(pid: u32, uid: u32, cpu: &str, rss: u64, name: &str) -> String {
         "{pid} 1 {uid} {} {cpu} {rss} Mon Oct 12 17:34:33 2026 {name}\n",
         if uid == 0 { "root" } else { "owner" }
     )
+}
+
+fn registry(entries: &[(u64, Option<u64>, Option<u64>)]) -> String {
+    let mut xml = String::from("<?xml version=\"1.0\"?><plist version=\"1.0\"><array>");
+    for (id, read, written) in entries {
+        xml += &format!(
+            "<dict><key>IOObjectClass</key><string>IOBlockStorageDriver</string><key>IORegistryEntryID</key><integer>{id}</integer><key>Statistics</key><dict>"
+        );
+        for (key, value) in [("Bytes (Read)", read), ("Bytes (Write)", written)] {
+            if let Some(value) = value {
+                xml += &format!("<key>{key}</key><integer>{value}</integer>");
+            }
+        }
+        xml += "</dict></dict>";
+    }
+    xml + "</array></plist>"
+}
+
+#[test]
+fn disk_reports_directional_host_rates_using_its_actual_interval() {
+    let rows = row(1, 501, "0:00.00", 1, "/one");
+    let lab = Lab::new(rows.clone(), rows);
+    lab.process(1, 1);
+    lab.write(
+        "ioreg",
+        json!({"delay_ms":200,"stdout_readings":[
+            registry(&[(2, Some(u64::MAX-5), Some(100)),(1, Some(100), Some(200))]),
+            registry(&[(1, Some(400), Some(600)),(2, Some(u64::MAX), Some(100))])
+        ]}),
+    );
+    let a = lab.answer();
+    let disk = &a["host"]["disk"];
+    let seconds = disk["window_seconds"]
+        .as_f64()
+        .expect("actual disk interval");
+    assert!(seconds >= 1.2);
+    assert!((disk["read_bytes_per_second"].as_f64().unwrap() * seconds - 305.0).abs() < 0.001);
+    assert!((disk["written_bytes_per_second"].as_f64().unwrap() * seconds - 400.0).abs() < 0.001);
+    let state: Value =
+        serde_json::from_slice(&fs::read(lab.0.join("ioreg.json")).unwrap()).unwrap();
+    assert_eq!(
+        state["calls"],
+        json!([
+            ["-a", "-r", "-c", "IOBlockStorageDriver", "-d", "1"],
+            ["-a", "-r", "-c", "IOBlockStorageDriver", "-d", "1"]
+        ])
+    );
+}
+
+#[test]
+fn disk_invalid_inventories_and_source_failures_skip_host_without_losing_other_measurements() {
+    let good = registry(&[(1, Some(100), Some(200))]);
+    let bad = [
+        String::new(),
+        "permission denied".into(),
+        registry(&[]),
+        good.trim_end_matches("</plist>").into(),
+        registry(&[(1, Some(110), Some(220)), (1, Some(110), Some(220))]),
+        registry(&[(2, Some(110), Some(220))]),
+        registry(&[(1, Some(110), Some(220)), (2, Some(0), Some(0))]),
+        good.replace("IORegistryEntryID", "MissingIdentity"),
+        good.replace("IOBlockStorageDriver", "OtherClass"),
+        good.replace(
+            "<integer>1</integer>",
+            "<integer>1</integer><key>IORegistryEntryID</key><integer>2</integer>",
+        ),
+        good.replace(
+            "</plist>",
+            "</plist><plist version=\"1.0\"><array/></plist>",
+        ),
+    ];
+    for text in bad {
+        let rows = row(1, 501, "0:00.00", 1, "/one");
+        let lab = Lab::new(rows.clone(), rows);
+        lab.process(1, 1);
+        lab.write("ioreg", json!({"stdout_readings":[good,text]}));
+        let a = lab.answer();
+        assert!(a["host"]["disk"]["read_bytes_per_second"].is_null());
+        assert!(a["host"]["disk"]["written_bytes_per_second"].is_null());
+        assert_eq!(a["processes"][0]["disk"]["written_bytes"], 0);
+        assert_eq!(a["processes"][0]["cpu_percent"], 0.0);
+        assert!(a["volumes"].is_array());
+        assert!(
+            a["skipped"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s["measurement"] == "host.disk"
+                    && s["count"] == 1
+                    && s["fix"].as_str().unwrap().contains("hostvitals doctor"))
+        );
+    }
+    for state in [
+        json!({"exit_code":77,"stderr":"denied"}),
+        json!({"stdout":"x".repeat(32*1024*1024+1)}),
+    ] {
+        let rows = row(1, 501, "0:00.00", 1, "/one");
+        let lab = Lab::new(rows.clone(), rows);
+        lab.process(1, 1);
+        lab.write("ioreg", state);
+        let a = lab.answer();
+        assert!(a["host"]["disk"]["window_seconds"].is_null());
+        assert!(a["host"]["disk"]["read_bytes_per_second"].is_null());
+        assert!(
+            a["skipped"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s["measurement"] == "host.disk"
+                    && !s["reason"].as_str().unwrap().is_empty())
+        );
+    }
+}
+
+#[test]
+fn disk_partial_regressed_and_overflowed_directions_retain_independent_rates() {
+    let cases = [
+        (
+            registry(&[(1, Some(100), Some(200))]),
+            registry(&[(1, None, Some(220))]),
+        ),
+        (
+            registry(&[(1, Some(100), Some(200))]),
+            registry(&[(1, Some(99), Some(220))]),
+        ),
+        (
+            registry(&[(1, Some(100), Some(200))]),
+            registry(&[(1, Some(110), Some(220))])
+                .replace("<integer>110</integer>", "<string>110</string>"),
+        ),
+        (
+            registry(&[(1, Some(100), Some(200))]),
+            registry(&[(1, Some(110), Some(220))]).replace(
+                "<integer>110</integer>",
+                "<integer>18446744073709551616</integer>",
+            ),
+        ),
+        (
+            registry(&[(1, Some(0), Some(0)), (2, Some(0), Some(0))]),
+            registry(&[(1, Some(u64::MAX), Some(10)), (2, Some(1), Some(10))]),
+        ),
+    ];
+    for (before, after) in cases {
+        let rows = row(1, 501, "0:00.00", 1, "/one");
+        let lab = Lab::new(rows.clone(), rows);
+        lab.process(1, 1);
+        lab.write("ioreg", json!({"stdout_readings":[before,after]}));
+        let a = lab.answer();
+        let disk = &a["host"]["disk"];
+        assert!(disk["read_bytes_per_second"].is_null(), "{disk}");
+        assert!(
+            (disk["written_bytes_per_second"].as_f64().unwrap()
+                * disk["window_seconds"].as_f64().unwrap()
+                - 20.0)
+                .abs()
+                < 0.001
+        );
+        assert!(
+            a["skipped"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s["measurement"] == "host.disk.read_bytes_per_second" && s["count"] == 1)
+        );
+    }
+}
+
+#[test]
+fn disk_never_sums_descendant_statistics() {
+    let rows = row(1, 501, "0:00.00", 1, "/one");
+    let lab = Lab::new(rows.clone(), rows);
+    lab.process(1, 1);
+    let xml = include_str!("fixtures/ioreg.xml");
+    lab.write("ioreg",json!({"stdout_readings":[xml,xml.replace("<integer>1000</integer>","<integer>1100</integer>").replace("<integer>9999999</integer>","<integer>19999999</integer>")]}));
+    let a = lab.answer();
+    let disk = &a["host"]["disk"];
+    assert!(
+        (disk["read_bytes_per_second"].as_f64().unwrap()
+            * disk["window_seconds"].as_f64().unwrap()
+            - 100.0)
+            .abs()
+            < 0.001
+    );
+    assert_eq!(disk["written_bytes_per_second"], 0.0);
+}
+
+#[test]
+fn process_disk_uses_two_readings_and_ranks_complete_apps_by_window_writes() {
+    let rows = row(10, 501, "0:00.00", 1, "/App")
+        + &row(11, 501, "0:00.00", 1, "/helper")
+        + &row(20, 501, "0:00.00", 1, "/tie")
+        + &row(30, 501, "0:00.00", 1, "/zero")
+        + &row(40, 0, "0:00.00", 1, "/root");
+    let lab = Lab::new(rows.clone(), rows);
+    for (pid, app, read, written) in [
+        (10, 10, 50, 600),
+        (11, 10, 60, 700),
+        (20, 20, 0, 700),
+        (30, 30, 0, 0),
+        (40, 10, 999, 9999),
+    ] {
+        lab.process(pid, app);
+        lab.write(&format!("now-rusage-before-{pid}"), json!({"status":"available","data":{"resident_bytes":999,"footprint_bytes":1000,"peak_footprint_bytes":2000,"read_bytes":9000,"written_bytes":8000,"energy_nj":0}}));
+        lab.write(&format!("now-rusage-{pid}"), json!({"status":"available","data":{"resident_bytes":999,"footprint_bytes":3000,"peak_footprint_bytes":4000,"read_bytes":9000+read,"written_bytes":8000+written,"energy_nj":0}}));
+    }
+    let a = lab.answer();
+    assert_eq!(a["processes"][0]["disk"]["read_bytes"], 50);
+    assert_eq!(a["processes"][0]["disk"]["written_bytes"], 600);
+    assert!(
+        a["processes"][0]["disk"]["window_seconds"]
+            .as_f64()
+            .unwrap()
+            >= 1.0
+    );
+    assert_eq!(a["processes"][0]["footprint_bytes"], 3000);
+    assert_eq!(a["processes"][4]["disk"]["written_bytes"], Value::Null);
+    assert_eq!(a["rankings"]["processes_by_disk_written"][0]["pid"], 11);
+    assert_eq!(a["rankings"]["processes_by_disk_written"][1]["pid"], 20);
+    assert_eq!(a["rankings"]["apps_by_disk_written"][0]["app_pid"], 20);
+    assert_eq!(a["rankings"]["apps_by_disk_written"][1]["app_pid"], 30);
+    assert_eq!(
+        a["rankings"]["apps_by_disk_written"][1]["disk"]["written_bytes"],
+        0
+    );
+    assert!(a["apps"][0]["disk"]["written_bytes"].is_null());
+    assert!(
+        a["skipped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["measurement"] == "disk"
+                && s["count"] == 1
+                && s["fix"] == "sudo hostvitals now")
+    );
+}
+
+#[test]
+fn process_disk_identity_failed_baselines_and_regressions_never_invent_activity() {
+    let before = row(1, 501, "0:00.00", 1, "/reused")
+        + &row(2, 501, "0:00.00", 1, "/regressed")
+        + &row(3, 501, "0:00.00", 1, "/failed baseline")
+        + &row(4, 501, "0:00.00", 1, "/failed final");
+    let after = row(1, 501, "0:00.00", 1, "/reused").replace("Oct 12", "Oct 25")
+        + &row(2, 501, "0:00.00", 1, "/regressed")
+        + &row(3, 501, "0:00.00", 1, "/failed baseline")
+        + &row(4, 501, "0:00.00", 1, "/failed final")
+        + &row(5, 501, "0:00.00", 1, "/new");
+    let lab = Lab::new(before, after);
+    for pid in 1..=5 {
+        lab.process(pid, 1);
+        lab.write(&format!("now-rusage-before-{pid}"),json!({"status":"available","data":{"resident_bytes":1,"footprint_bytes":1,"peak_footprint_bytes":1,"read_bytes":100,"written_bytes":100,"energy_nj":0}}));
+        lab.write(&format!("now-rusage-{pid}"),json!({"status":"available","data":{"resident_bytes":1,"footprint_bytes":200,"peak_footprint_bytes":300,"read_bytes":99,"written_bytes":120,"energy_nj":0}}));
+    }
+    lab.write(
+        "now-rusage-before-3",
+        json!({"status":"unavailable","reason":"baseline denied"}),
+    );
+    lab.write(
+        "now-rusage-4",
+        json!({"status":"unavailable","reason":"process exited"}),
+    );
+    let a = lab.answer();
+    for index in [0, 2, 3, 4] {
+        assert!(a["processes"][index]["disk"]["read_bytes"].is_null());
+        assert!(a["processes"][index]["disk"]["written_bytes"].is_null());
+        assert!(a["processes"][index]["disk"]["window_seconds"].is_null());
+    }
+    assert!(a["processes"][1]["disk"]["read_bytes"].is_null());
+    assert_eq!(a["processes"][1]["disk"]["written_bytes"], 20);
+    assert_eq!(a["processes"][2]["footprint_bytes"], 200);
+    assert_eq!(
+        a["rankings"]["processes_by_disk_written"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(a["rankings"]["processes_by_disk_written"][0]["pid"], 2);
+    assert_eq!(a["rankings"]["apps_by_disk_written"], json!([]));
+    assert!(
+        a["skipped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["measurement"] == "disk.written_bytes"
+                && s["count"] == 4
+                && s["reason"].as_str().unwrap().contains("baseline denied"))
+    );
+}
+
+#[test]
+fn app_disk_checks_its_sum_without_hiding_the_independent_direction_or_host() {
+    let rows = row(1, 501, "0:00.00", 1, "/App") + &row(2, 501, "0:00.00", 1, "/helper");
+    let lab = Lab::new(rows.clone(), rows);
+    for (pid, writes) in [(1, 10), (2, 20)] {
+        lab.process(pid, 1);
+        lab.write(&format!("now-rusage-{pid}"),json!({"status":"available","data":{"resident_bytes":1,"footprint_bytes":100,"peak_footprint_bytes":200,"read_bytes":u64::MAX,"written_bytes":writes,"energy_nj":0}}));
+    }
+    let a = lab.answer();
+    assert_eq!(a["processes"][0]["disk"]["read_bytes"], u64::MAX);
+    assert!(a["apps"][0]["disk"]["read_bytes"].is_null());
+    assert_eq!(a["apps"][0]["disk"]["written_bytes"], 30);
+    assert_eq!(
+        a["rankings"]["apps_by_disk_written"][0]["disk"]["written_bytes"],
+        30
+    );
+    assert_eq!(a["host"]["disk"]["read_bytes_per_second"], 0.0);
+    assert!(
+        a["skipped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["measurement"] == "apps.disk.read_bytes"
+                && s["count"] == 1
+                && s["reason"].as_str().unwrap().contains("overflow"))
+    );
+}
+
+#[test]
+fn missing_directional_source_is_explicit_and_never_uses_process_bytes_as_host_traffic() {
+    let rows = row(1, 501, "0:00.00", 1, "/one");
+    let lab = Lab::new(rows.clone(), rows);
+    lab.process(1, 1);
+    fs::remove_file(lab.0.join("bin/ioreg")).unwrap();
+    let a = lab.answer();
+    assert!(a["host"]["disk"]["read_bytes_per_second"].is_null());
+    assert!(a["host"]["disk"]["written_bytes_per_second"].is_null());
+    assert_eq!(a["processes"][0]["disk"]["written_bytes"], 0);
+    assert!(
+        a["skipped"].as_array().unwrap().iter().any(
+            |s| s["measurement"] == "host.disk" && s["fix"].as_str().unwrap().contains("PATH=")
+        )
+    );
+}
+
+#[test]
+fn malformed_failed_or_missing_volume_reports_are_unknown_not_empty_inventories() {
+    for text in [
+        "",
+        "not df",
+        "Filesystem 1024-blocks Used Available Capacity Mounted on\n",
+        "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/a 1000 500 500 50% /\ntruncated",
+        "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/a 1000 500 500 50% /\n/dev/a 1000 500 500 50% /\n",
+    ] {
+        let rows = row(1, 501, "0:00.00", 1, "/one");
+        let lab = Lab::new(rows.clone(), rows);
+        lab.process(1, 1);
+        lab.write("df", json!({"stdout":text}));
+        let a = lab.answer();
+        assert!(a["volumes"].is_null());
+        assert_eq!(a["host"]["disk"]["written_bytes_per_second"], 0.0);
+        assert!(
+            a["skipped"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s["measurement"] == "volumes"
+                    && s["count"] == 1
+                    && s["fix"].as_str().unwrap().contains("df -a -l -k -P"))
+        );
+    }
+    let rows = row(1, 501, "0:00.00", 1, "/one");
+    let lab = Lab::new(rows.clone(), rows);
+    lab.process(1, 1);
+    lab.write("df", json!({"exit_code":77,"stderr":"volume inaccessible"}));
+    let a = lab.answer();
+    assert!(a["volumes"].is_null());
+    assert!(a["skipped"].as_array().unwrap().iter().any(|s| {
+        s["measurement"] == "volumes"
+            && s["reason"]
+                .as_str()
+                .unwrap()
+                .contains("volume inaccessible")
+    }));
+}
+
+#[test]
+fn every_local_volume_has_capacity_and_only_strictly_low_free_space_suggests_diskreap() {
+    let rows = row(1, 501, "0:00.00", 1, "/one");
+    let lab = Lab::new(rows.clone(), rows);
+    lab.process(1, 1);
+    lab.healthy_memory(1024000);
+    lab.write("df",json!({"stdout":"Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/shared1 1000 800 90 90% /Volumes/low space\n/dev/shared2 1000 800 90 90% /Volumes/shared capacity\n/dev/exact 1000 800 100 89% /\n/dev/above 1000 800 110 88% /Volumes/above\n/dev/zero 0 0 0 100% /Volumes/zero\n/dev/unknown - - - - /Volumes/unknown\n"}));
+    // An executable suggestion must remain untouched even when it is on PATH.
+    use std::os::unix::fs::PermissionsExt;
+    fs::write(
+        lab.0.join("bin/diskreap"),
+        "#!/bin/sh\n: > \"$HOSTVITALS_PROBE_FIXTURES/diskreap-called\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(
+        lab.0.join("bin/diskreap"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let a = lab.answer();
+    let volumes = a["volumes"]
+        .as_array()
+        .expect("mounted local volume inventory");
+    assert_eq!(volumes.len(), 6);
+    assert_eq!(
+        volumes[0],
+        json!({"filesystem":"/dev/shared1","mount_point":"/Volumes/low space","size_bytes":1024000,"free_bytes":92160,"free_share":0.09})
+    );
+    assert_eq!(volumes[1]["free_bytes"], 92160);
+    assert_eq!(volumes[4]["size_bytes"], 0);
+    assert!(volumes[4]["free_share"].is_null());
+    assert!(volumes[5]["size_bytes"].is_null());
+    let findings = a["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 2);
+    assert_eq!(
+        findings[0],
+        json!({"rule":"volume_free","subject":{"kind":"volume","filesystem":"/dev/shared1","mount_point":"/Volumes/low space"},"measured":{"size_bytes":1024000,"free_bytes":92160,"free_share":0.09},"threshold":{"comparison":"<","percent":10},"next_command":"diskreap scan"})
+    );
+    assert_eq!(findings[1]["next_command"], "diskreap scan");
+    assert!(!lab.0.join("diskreap-called").exists());
+    let state: Value = serde_json::from_slice(&fs::read(lab.0.join("df.json")).unwrap()).unwrap();
+    assert_eq!(state["calls"], json!([["-a", "-l", "-k", "-P"]]));
+    assert!(
+        a["skipped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["measurement"] == "volumes" && s["count"] == 2)
+    );
+}
+
+#[test]
+fn disk_help_describes_measurements_completeness_ranking_and_the_authoritative_threshold() {
+    let out = Command::new(env!("CARGO_BIN_EXE_hostvitals"))
+        .args(["now", "--help"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let help = String::from_utf8(out.stdout).unwrap();
+    for term in [
+        "host.disk",
+        "read_bytes_per_second",
+        "written_bytes_per_second",
+        "block-device accounting",
+        "virtual",
+        "disk.window_seconds",
+        "processes_by_disk_written",
+        "apps_by_disk_written",
+        "mount_point",
+        "filesystem",
+        "size_bytes",
+        "free_bytes",
+        "free_share",
+        "diskreap scan",
+        "shared",
+        "null",
+    ] {
+        assert!(help.contains(term), "missing {term}");
+    }
+    assert!(help.contains(&format!(
+        "free < {}%",
+        hostvitals_policy::disk::VOLUME_FREE_PERCENT
+    )));
+    assert!(!help.contains("{const:"));
 }
 
 #[test]
@@ -424,10 +893,23 @@ fn now_measures_the_window_and_ranks_root_memory_and_responsible_apps() {
     );
     let skipped = a["skipped"].as_array().unwrap();
     assert_eq!(skipped.len(), 4, "{skipped:?}");
-    for measurement in ["footprint", "disk", "apps.disk.read_bytes", "apps.disk.written_bytes"] {
-        let record = skipped.iter().find(|s| s["measurement"] == measurement).unwrap();
+    for measurement in [
+        "footprint",
+        "disk",
+        "apps.disk.read_bytes",
+        "apps.disk.written_bytes",
+    ] {
+        let record = skipped
+            .iter()
+            .find(|s| s["measurement"] == measurement)
+            .unwrap();
         assert_eq!(record["count"], 2);
-        assert!(record["fix"].as_str().unwrap().starts_with("sudo hostvitals now"));
+        assert!(
+            record["fix"]
+                .as_str()
+                .unwrap()
+                .starts_with("sudo hostvitals now")
+        );
     }
     assert_eq!(skipped[0]["count"], 2);
     assert_eq!(skipped[0]["fix"], "sudo hostvitals now");
@@ -911,6 +1393,31 @@ fn live_now_reads_host_and_every_user_without_root() {
     );
     let a: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(a["source"], "host");
+    let disk = &a["host"]["disk"];
+    for field in ["read_bytes_per_second", "written_bytes_per_second"] {
+        assert!(disk.get(field).is_some());
+        if let Some(rate) = disk[field].as_f64() {
+            assert!(rate.is_finite() && rate >= 0.0);
+        } else {
+            assert!(
+                a["skipped"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|s| s["measurement"].as_str().unwrap().starts_with("host.disk"))
+            );
+        }
+    }
+    assert!(disk["window_seconds"].as_f64().is_some_and(|s| s >= 1.0));
+    let volumes = a["volumes"].as_array().unwrap();
+    assert!(volumes.iter().any(|v| v["mount_point"] == "/"));
+    for v in volumes {
+        assert!(!v["filesystem"].as_str().unwrap().is_empty());
+        assert!(v["mount_point"].as_str().unwrap().starts_with('/'));
+        if let Some(share) = v["free_share"].as_f64() {
+            assert!((0.0..=1.0).contains(&share));
+        }
+    }
     assert!(a["host"]["network"]["window_seconds"].as_f64().unwrap() >= 1.0);
     let network_processes = a["processes"].as_array().unwrap();
     for direction in ["bytes_in_per_second", "bytes_out_per_second"] {

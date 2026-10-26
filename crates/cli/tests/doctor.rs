@@ -139,12 +139,47 @@ impl Lab {
                 serde_json::to_value(hostvitals::tools::StandIn::default()).unwrap(),
             );
         }
+        self.write(
+            "ioreg",
+            json!({"stdout":include_str!("fixtures/ioreg.xml")}),
+        );
     }
     fn calls(&self, name: &str) -> Vec<Vec<String>> {
         let state: hostvitals::tools::StandIn =
             serde_json::from_slice(&fs::read(self.0.join(format!("{name}.json"))).unwrap())
                 .unwrap();
         state.calls
+    }
+}
+
+#[test]
+fn directional_disk_probe_rejects_unusable_reports_even_with_successful_exit() {
+    for text in [
+        "",
+        "not a plist",
+        "<plist version=\"1.0\"><array/></plist>",
+        include_str!("fixtures/ioreg.xml")
+            .replace("Bytes (Read)", "Other")
+            .as_str(),
+        include_str!("fixtures/ioreg.xml")
+            .replace("<integer>1000</integer>", "<integer>-1</integer>")
+            .as_str(),
+    ] {
+        let lab = Lab::new();
+        lab.install_clis();
+        lab.write("ioreg", json!({"stdout":text}));
+        let out = lab.run(&["doctor"]);
+        assert!(out.status.success());
+        let a: Value = serde_json::from_slice(&out.stdout).unwrap();
+        let checks = a["checks"].as_array().unwrap();
+        let disk = checks.iter().find(|c| c["name"] == "ioreg").unwrap();
+        assert_eq!(disk["status"], "unavailable", "{text}");
+        assert!(disk["reason"].as_str().unwrap().contains("ioreg"));
+        assert!(!disk["fix"].as_str().unwrap().is_empty());
+        assert_eq!(
+            checks.iter().find(|c| c["name"] == "iostat").unwrap()["status"],
+            "available"
+        );
     }
 }
 

@@ -111,3 +111,13 @@ fn thread_named_functions_remain_frames_and_blank_frames_are_rejected() {
         "missing sample frame"
     );
 }
+
+#[test]
+fn numeric_thread_named_symbols_are_distinct_from_thread_headers() {
+    let summary = summarize("Call graph:\n    10 Thread_1\n      10 Thread_123  (in worker) + 1\n        10 crunch  (in worker) + 2\nBinary Images:\n", 10).unwrap();
+    assert_eq!(
+        summary.hot_paths[0].frames,
+        ["Thread_123 (in worker)", "crunch (in worker)"]
+    );
+    assert_eq!(summary.total_samples, 10);
+}

@@ -1,6 +1,8 @@
 //! Interpret counted sample call graphs without reading a host or trusting its thresholded tables.
 use std::collections::BTreeMap;
 
+const IMAGE_MARKER: &str = "  (in ";
+
 #[derive(Debug)]
 pub struct HotPath {
     pub frames: Vec<String>,
@@ -89,11 +91,12 @@ fn add_row(
     if frame.is_empty() {
         return Err("missing sample frame");
     }
-    let thread = frame
-        .split_whitespace()
-        .next()
-        .and_then(|name| name.strip_prefix("Thread_"))
-        .is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()));
+    let thread = !frame.contains(IMAGE_MARKER)
+        && frame
+            .split_whitespace()
+            .next()
+            .and_then(|name| name.strip_prefix("Thread_"))
+            .is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()));
     while stack
         .last()
         .is_some_and(|node| thread || node.depth >= depth)
@@ -239,7 +242,7 @@ fn finish_node(
 }
 
 fn frame_name(frame: &str) -> String {
-    if let Some((symbol, image)) = frame.split_once("  (in ")
+    if let Some((symbol, image)) = frame.split_once(IMAGE_MARKER)
         && let Some((image, _)) = image.split_once(')')
     {
         return format!("{} (in {image})", symbol.trim());

@@ -9,6 +9,7 @@ mod doctor;
 mod help;
 mod memory;
 mod now;
+mod process;
 pub mod tools;
 
 use clap::FromArgMatches;
@@ -38,6 +39,17 @@ pub fn main(args: impl IntoIterator<Item = OsString>) -> ExitCode {
         Err(e) => return refuse(format!("{e}; run hostvitals --help")),
     };
     match cli.command {
+        help::Command::Process { pid, seconds } => {
+            let source =
+                direct::Source(std::env::var_os("HOSTVITALS_PROBE_FIXTURES").map(Into::into));
+            if source.0.is_some() {
+                eprintln!("warning: native observations use explicit fixtures");
+            }
+            match process::answer(&source, pid, seconds) {
+                Ok(answer) => println!("{answer}"),
+                Err(error) => return refuse(error),
+            }
+        }
         help::Command::Now { seconds, top } => {
             let source =
                 direct::Source(std::env::var_os("HOSTVITALS_PROBE_FIXTURES").map(Into::into));

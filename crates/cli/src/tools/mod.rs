@@ -8,8 +8,10 @@ use std::{
     time::{Duration, Instant},
 };
 pub(crate) mod footprint;
-mod fs_usage;
+pub(crate) mod fs_usage;
 mod iostat;
+pub(crate) mod lsof;
+pub(crate) mod names;
 pub(crate) mod nettop;
 mod pmset;
 mod powermetrics;
@@ -41,6 +43,10 @@ pub enum Tool {
     Powermetrics,
     /// Filesystem activity; requires root and is otherwise skipped.
     FsUsage,
+    /// Working directory, open files and numeric socket endpoints; found on PATH.
+    Lsof,
+    /// Reverse lookup through the macOS directory cache; found on PATH.
+    Dscacheutil,
 }
 impl Tool {
     /// Every declared tool, derived from the enum rather than a second registry.
@@ -75,7 +81,9 @@ impl Tool {
             Self::Footprint => footprint::args(&pid),
             Self::Pmset => pmset::args(&pid),
             Self::Powermetrics => powermetrics::args(&pid),
-            Self::FsUsage => fs_usage::args(&pid),
+            Self::FsUsage => fs_usage::args(&pid, "1"),
+            Self::Lsof => lsof::args(&pid),
+            Self::Dscacheutil => names::args("127.0.0.1"),
         };
         run(Command::new(path).args(args), false).map(|_| ())
     }
@@ -99,9 +107,9 @@ pub(crate) fn capture(tool: Tool, args: Vec<&str>) -> Result<String, String> {
     execute(
         Command::new(path).args(args),
         MEASUREMENT_LIMIT_MIB * 1024 * 1024,
-        MEASUREMENT_TIMEOUT_SECONDS,
+        Duration::from_secs(MEASUREMENT_TIMEOUT_SECONDS),
     )
-    .and_then(|bytes| String::from_utf8(bytes).map_err(|_| "report is not UTF-8".into()))
+    .and_then(|output| String::from_utf8(output.stdout).map_err(|_| "report is not UTF-8".into()))
 }
 
 /// Maximum report size; exceeding it skips the read rather than interpreting a partial report.
@@ -118,8 +126,9 @@ fn run(command: &mut Command, capture: bool) -> Result<Vec<u8>, String> {
     execute(
         command,
         if capture { 64 * 1024 * 1024 } else { 0 },
-        PROBE_TIMEOUT_SECONDS,
+        Duration::from_secs(PROBE_TIMEOUT_SECONDS),
     )
+    .map(|output| output.stdout)
 }
 
 fn drain(mut pipe: impl std::io::Read, limit: usize) -> std::io::Result<(Vec<u8>, bool)> {
@@ -138,7 +147,12 @@ fn drain(mut pipe: impl std::io::Read, limit: usize) -> std::io::Result<(Vec<u8>
     Ok((captured, overflow))
 }
 
-fn execute(command: &mut Command, limit: usize, timeout: u64) -> Result<Vec<u8>, String> {
+struct Captured {
+    stdout: Vec<u8>,
+    stderr: String,
+}
+
+fn execute(command: &mut Command, limit: usize, timeout: Duration) -> Result<Captured, String> {
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -154,13 +168,11 @@ fn execute(command: &mut Command, limit: usize, timeout: u64) -> Result<Vec<u8>,
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Ok(status),
-            Ok(None) if start.elapsed() < Duration::from_secs(timeout) => {
-                thread::sleep(Duration::from_millis(10))
-            }
+            Ok(None) if start.elapsed() < timeout => thread::sleep(Duration::from_millis(10)),
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                break Err(format!("read exceeded {timeout} seconds"));
+                break Err(format!("read exceeded {} seconds", timeout.as_secs_f64()));
             }
             Err(e) => {
                 let _ = child.kill();
@@ -183,7 +195,10 @@ fn execute(command: &mut Command, limit: usize, timeout: u64) -> Result<Vec<u8>,
             if limit != 0 && overflow {
                 return Err(format!("report exceeded {limit} bytes"));
             }
-            Ok(output)
+            Ok(Captured {
+                stdout: output,
+                stderr: diagnostic.into_owned(),
+            })
         }
         Ok(status) => Err(format!("{status}: {diagnostic}")),
         Err(error) => Err(error),

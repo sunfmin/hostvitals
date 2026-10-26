@@ -19,6 +19,32 @@ pub(crate) struct Cli {
 
 #[derive(Subcommand)]
 pub(crate) enum Command {
+    /// Observes one process whole, with its command arguments redacted.
+    ///
+    /// Run `hostvitals process 123 --seconds 3`. Reads two ps inventories and accessible native counters, exact KERN_PROCARGS2 arguments, task thread count, responsible App and lsof files/sockets. Root also runs fs_usage over the window. Only observes; saves nothing. PID is 1..2147483647 and --seconds is a positive whole number (default {const:PROCESS_DEFAULT_SECONDS}). A missing, exited or replaced PID refuses with its PID and a retry line; mandatory ps failure also refuses.
+    ///
+    /// Answers `source` (host or explicitly labelled fixtures), `pid`, `parent_pid`, `uid`, `user`, `name` (executable basename), `started_at` (UTC ps start time), `app`, `command_line`, `cwd`, `cpu_seconds` (cumulative), `cpu_percent` (window change; one core is 100%), `window_seconds` (actual monotonic CPU interval), `resident_bytes`, `footprint_bytes`, `peak_footprint_bytes` (lifetime), `disk`, `energy_nj` (cumulative nanojoules), `threads`, `open_files`, `sockets`, `file_activity`, and `skipped`.
+    ///
+    /// `app` has `app_pid`, `name` and `started_at`; unreadable/exited App identity leaves its latter fields null. Attribution uses macOS responsibility, never the parent. `command_line` is an array preserving argv boundaries, empty arguments and public values; invalid UTF-8 uses replacement characters. A flag containing {const:SECRET_FLAG_WORDS} (any case) has its equals-form or next-argument value replaced by <redacted>, even when empty or flag-like. URL userinfo is replaced by <redacted>. This is flag/URL redaction, not detection of secrets inside arbitrary scripts or public positional text.
+    ///
+    /// hostvitals asks for process arguments and parses only the argc-delimited vector. It never interprets, returns, logs or keeps any environment entry. The kernel buffer is bounded to {const:ARGUMENT_LIMIT_MIB} MiB and released immediately after sanitizing argv; environment bytes can transiently enter memory. Arguments are never reconstructed from ps.
+    ///
+    /// `disk` has cumulative `read_bytes`, `written_bytes`, `window_read_bytes`, `window_written_bytes`, and its actual `window_seconds` (native readings can differ slightly from the CPU interval). Regressed counters give null window changes with a skipped entry. Energy is a cumulative counter, not watts or an energy-impact score.
+    ///
+    /// `open_files` items have `fd`, `kind` and `path`; excludes cwd and sockets, includes executable/mapped files and descriptors. `sockets` items have `fd`, `kind`, `protocol`, `local`, `remote_ip`, `remote_port`, `remote_name`, and `state`. IPv4/IPv6 remote addresses and ports remain numeric; local and Unix socket endpoints retain lsof's text. Listening/unconnected/Unix sockets have null remote fields. Reverse lookups use one shared deadline of {const:LOOKUP_SECONDS} seconds for all distinct remote IPs; a failed or timed-out name stays the IP. Lookups may send DNS requests. Empty arrays mean observed empty lists, never denied reads.
+    ///
+    /// `file_activity` is root-only fs_usage read/write events over the requested window: items have `operation`, `path`, and `bytes` (requested byte count, null if absent). Paths can contain spaces; the counters in disk remain authoritative byte accounting. Paths absent from an event are resolved from an initial lsof descriptor reading and subsequent open/close events; duplication clears uncertain associations. Unresolved paths are null with a skipped entry. This is a best-effort trace of a changing process, not a durable file audit. fs_usage can lose events and reports this as skipped, never a complete empty list. Other filesystem operations are excluded.
+    ///
+    /// Optional denied, missing or malformed readings are null with `skipped` entries (`measurement`, `reason`, `fix`). Non-root callers observing another user's process receive only ps identity, resident and CPU; all other fields are skipped with `sudo hostvitals process PID --seconds N`. fs_usage is skipped unless already root. hostvitals never runs sudo. Protected processes may remain unreadable as root. Missing tools name a PATH repair; unsupported reports/private interfaces name an update. CLI reports are bounded to 32 MiB and 30 seconds; fs_usage is bounded to its window plus five seconds. Explicit fixture reads never fall back to the host.
+    #[command(next_help_heading = "Run by the agent", verbatim_doc_comment)]
+    Process {
+        /// Positive process ID to observe.
+        #[arg(value_parser = clap::value_parser!(u32).range(1..=2147483647))]
+        pid: u32,
+        /// Minimum observation window in whole seconds.
+        #[arg(long, default_value_t = crate::process::DEFAULT_SECONDS, value_parser = clap::value_parser!(u64).range(1..))]
+        seconds: u64,
+    },
     /// Measures CPU, memory and network over one window for the host, every user's processes and their Apps.
     ///
     /// Run `hostvitals now --seconds 3 --top 10`. Reads two all-user `ps` and `nettop` snapshots, cumulative host CPU ticks, memory sysctls, process responsibility, and accessible rusage footprints. Only reads; saves nothing. `--seconds` and `--top` require a whole number at least 1. Refusals name the corrected command. Missing or malformed process or host snapshots refuse with a retry line; optional native and network reads are null with a `skipped` entry.
@@ -95,7 +121,7 @@ pub(crate) enum Command {
     /// With no topic, answers the index. `hostvitals help doctor` opens the doctor's help. An unknown topic refuses with a line to open the index.
     #[command(next_help_heading = "Run by the agent", verbatim_doc_comment)]
     Help {
-        /// `doctor`, `now`, or `memory` for a command, `all` for the full manual, or omit for the index.
+        /// `doctor`, `now`, `memory`, or `process` for a command, `all` for the full manual, or omit for the index.
         #[arg(verbatim_doc_comment)]
         topic: Option<String>,
     },
@@ -123,6 +149,13 @@ fn top(value: &str) -> Result<std::num::NonZeroUsize, String> {
 pub(crate) fn manual() -> Help {
     Help::new(Cli::command())
         .table::<Tool>("tools")
+        .constant("PROCESS_DEFAULT_SECONDS", crate::process::DEFAULT_SECONDS)
+        .constant("ARGUMENT_LIMIT_MIB", crate::direct::arguments::LIMIT_MIB)
+        .constant("LOOKUP_SECONDS", crate::tools::names::DEADLINE_SECONDS)
+        .constant(
+            "SECRET_FLAG_WORDS",
+            hostvitals_policy::redaction::SECRET_FLAG_WORDS.join(", "),
+        )
         .constant("PROBE_TIMEOUT_SECONDS", crate::tools::PROBE_TIMEOUT_SECONDS)
         .constant(
             "MEASUREMENT_TIMEOUT_SECONDS",

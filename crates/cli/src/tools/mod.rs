@@ -15,11 +15,11 @@ mod iostat;
 pub(crate) mod lsof;
 pub(crate) mod names;
 pub(crate) mod nettop;
-mod pmset;
-mod powermetrics;
+pub(crate) mod pmset;
+pub(crate) mod powermetrics;
 pub(crate) mod ps;
 pub mod sample;
-mod top;
+pub(crate) mod top;
 pub(crate) mod vmmap;
 
 /// The closed set of Apple CLIs doctor probes, shared with the CLI stand-in.
@@ -27,7 +27,7 @@ pub(crate) mod vmmap;
 pub enum Tool {
     /// Process CPU and resident memory; found on PATH.
     Ps,
-    /// Entitled process CPU and memory snapshots; found on PATH.
+    /// Entitled process CPU, memory and energy-impact snapshots; found on PATH.
     Top,
     /// Per-process network counters; found on PATH.
     Nettop,
@@ -112,11 +112,16 @@ pub struct StandIn {
 
 /// Captures a measurement with bounded output and time; truncated reports are never parsed.
 pub(crate) fn capture(tool: Tool, args: Vec<&str>) -> Result<String, String> {
+    capture_window(tool, args, 0)
+}
+
+/// A windowed source gets the requested interval plus the usual collection allowance.
+pub(crate) fn capture_window(tool: Tool, args: Vec<&str>, seconds: u64) -> Result<String, String> {
     let path = tool.find().ok_or("executable not found on PATH")?;
     execute(
         Command::new(path).args(args).env("LC_ALL", "C"),
         MEASUREMENT_LIMIT_MIB * 1024 * 1024,
-        Duration::from_secs(MEASUREMENT_TIMEOUT_SECONDS),
+        Duration::from_secs(seconds.saturating_add(MEASUREMENT_TIMEOUT_SECONDS)),
     )
     .and_then(|output| String::from_utf8(output.stdout).map_err(|_| "report is not UTF-8".into()))
 }

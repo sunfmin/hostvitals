@@ -110,6 +110,7 @@ fn write_rankings_preserve_exact_integers_zeroes_identity_ties_and_top() {
 fn app_disk_totals_propagate_unknown_and_checked_overflow_by_direction() {
     use hostvitals_policy::apps::{ProcessUsage, summarize};
     let usage = |app, read, written| ProcessUsage {
+        energy_impact: Some(0.0),
         app_pid: app,
         cpu_percent: Some(0.0),
         resident_bytes: 0,

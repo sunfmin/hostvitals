@@ -37,6 +37,12 @@ _Avoid_: Watts, Power.
 **Power**: The rate at which a hardware component draws energy, expressed in watts.
 _Avoid_: Energy impact, energy (energy accumulates over time).
 
+**CPU throttling**: A limit macOS places on the CPU's speed below its full-speed allowance.
+_Avoid_: High CPU usage (workload does not establish a speed limit).
+
+**GPU active share**: The fraction of a Window's recorded GPU state residency spent in active states.
+_Avoid_: GPU time by Process (that attributes GPU work to one Process).
+
 **Profile**: A sample of a Process's call stacks over a Window, used to explain where it spends time.
 _Avoid_: Trace (when only sampled stacks were observed).
 

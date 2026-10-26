@@ -5,6 +5,13 @@ pub const SWAP_USED_PERCENT: u64 = 80;
 pub const PROCESS_RESIDENT_PERCENT: u64 = 10;
 pub const PROCESS_CPU_CORES: u128 = 1;
 const NANOS_PER_HUNDREDTH: u128 = 10_000_000;
+pub const CPU_SPEED_LIMIT_PERCENT: u32 = 100;
+
+/// Only an observed speed limit below the full-speed threshold is a throttling finding.
+#[spec(fn(limit: u32) -> bool[limit < CPU_SPEED_LIMIT_PERCENT])]
+pub fn cpu_throttled(limit: u32) -> bool {
+    limit < CPU_SPEED_LIMIT_PERCENT
+}
 
 #[spec(fn() -> Pressure[Pressure::Warn])]
 pub fn memory_pressure_threshold() -> Pressure {
@@ -134,6 +141,11 @@ fn sustained_cpu(hundredths: u64, window: u128) -> bool {
 #[allow(dead_code)]
 mod rejected {
     use super::*;
+
+    #[should_fail]
+    fn full_speed_is_throttled() {
+        flux_rs::assert(cpu_throttled(100));
+    }
 
     #[should_fail]
     fn normal_pressure_is_a_finding() {

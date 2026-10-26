@@ -2,6 +2,7 @@
 use std::collections::BTreeMap;
 
 pub struct ProcessUsage {
+    pub energy_impact: Option<f64>,
     pub app_pid: Option<u32>,
     pub cpu_percent: Option<f64>,
     pub resident_bytes: u64,
@@ -13,6 +14,7 @@ pub struct ProcessUsage {
     pub disk_written_bytes: Option<u64>,
 }
 pub struct AppUsage {
+    pub energy_impact: Option<f64>,
     pub app_pid: u32,
     pub process_count: usize,
     pub cpu_percent: Option<f64>,
@@ -31,6 +33,7 @@ pub fn summarize(processes: &[ProcessUsage]) -> Vec<AppUsage> {
     for p in processes {
         if let Some(pid) = p.app_pid {
             let app = apps.entry(pid).or_insert(AppUsage {
+                energy_impact: Some(0.0),
                 app_pid: pid,
                 process_count: 0,
                 cpu_percent: Some(0.0),
@@ -46,6 +49,7 @@ pub fn summarize(processes: &[ProcessUsage]) -> Vec<AppUsage> {
             app.disk_read_bytes = super::add_bytes(app.disk_read_bytes, p.disk_read_bytes);
             app.disk_written_bytes = super::add_bytes(app.disk_written_bytes, p.disk_written_bytes);
             app.cpu_percent = super::add_rates(app.cpu_percent, p.cpu_percent);
+            app.energy_impact = super::add_rates(app.energy_impact, p.energy_impact);
             app.bytes_in_per_second =
                 super::add_rates(app.bytes_in_per_second, p.bytes_in_per_second);
             app.bytes_out_per_second =

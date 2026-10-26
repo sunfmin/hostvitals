@@ -70,7 +70,7 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = crate::process::DEFAULT_SECONDS, value_parser = clap::value_parser!(u64).range(1..))]
         seconds: u64,
     },
-    /// Judges and measures CPU, memory and network over one window for the host, every user's processes and their Apps.
+    /// Judges and measures CPU, memory, network and energy over one window for the host, every user's processes and their Apps.
     ///
     /// Run `hostvitals now --seconds 3 --top 10`. Reads two all-user `ps` and `nettop` snapshots, cumulative host CPU ticks, memory sysctls, process responsibility, and accessible rusage footprints. Only reads; saves nothing. `--seconds` and `--top` require a whole number at least 1. Refusals name the corrected command. Missing or malformed process or host snapshots refuse with a retry line; optional native and network reads are null with a `skipped` entry.
     ///
@@ -96,6 +96,16 @@ pub(crate) enum Command {
     ///
     /// Network rankings are `processes_by_network_in`, `processes_by_network_out`, `apps_by_network_in`, and `apps_by_network_out`. Each contains up to --top full records descending by the corresponding network bytes-per-second field, tied by ascending PID or app_pid. Null values are excluded; measured zeroes remain eligible.
     ///
+    /// Every Process and App has `energy_impact`: top's POWER score, a macOS energy-impact estimate, not watts. Reads all users with `top -l 2 -s SECONDS -stats pid,power`; discards the initial zero sample. The second sample covers top's own interval; collection can skew it from CPU, network and Power. `processes_by_energy` and `apps_by_energy` contain up to --top full records in descending score order, ties by ascending PID or app_pid. Missing scores or changed PID/start-time identities stay null and are counted in skipped; an App with any missing process score has a null total and is excluded from its Ranking. A failed or malformed top report skips only energy_impact.
+    ///
+    /// `host.battery` comes from `pmset -g batt`: `present` is false on a Mac without a battery; `power_source` retains Apple's source name (for example AC Power or Battery Power). `charge_percent` is 0..100, `charging` is a boolean, `state` retains the charging-state text, and `time_remaining_minutes` is Apple's estimate until discharge or full charge according to state, null when there is no estimate. No battery leaves the latter four fields null. A failed or unknown report makes battery null with a skipped entry.
+    ///
+    /// `host.thermal` comes from `pmset -g therm`: `cpu_speed_limit_percent`, `cpu_scheduler_limit_percent`, `available_cpus`, and `cpu_throttled`. Missing optional numbers are null. Apple's explicit no-recorded-CPU-power-status report means cpu_throttled false with null limits, not a measured full-speed percentage. The `cpu_throttled` finding means CPU speed limit < {const:FINDING_CPU_SPEED_LIMIT}%: measured has cpu_speed_limit_percent, threshold has comparison < and cpu_speed_limit_percent; its host subject suggests `hostvitals now --top 20`. A full-speed limit yields no finding. Failed or unknown thermal reports make thermal null and do not fabricate a finding.
+    ///
+    /// `host.power` reads IOReport without root: `window_seconds` is its actual monotonic sample interval, `cpu_watts`, `gpu_watts`, and `ane_watts` are energy deltas divided by that interval with explicit mJ/uJ/nJ conversion. Multi-die CPU and ANE channels are summed. `gpu_active_share` is active GPU residency divided by all residency (0..1), excluding OFF, IDLE and DOWN from active time. A missing or invalid channel makes only its field null with a skipped entry. Regressed or inconsistent counters are unknown; no accumulated energy in either raw sample also stays null because idle and restricted counters cannot be distinguished. A zero delta at a positive baseline can be an idle zero, but CPU energy must advance on the awake observing host; a stalled CPU source also leaves zero ANE energy unverified. Positive GPU and ANE observations remain usable. An absent private interface makes every power field null, skips power, and preserves all other observations; `hostvitals doctor` names the missing or unreadable interface. GPU residency is optional on hardware without those channels.
+    ///
+    /// Each Process also has `gpu_time_ms`, GPU time over `host.gpu_time_window_seconds`. Already-root observers run `powermetrics --samplers tasks --show-process-gpu` concurrently with the Window, convert its GPU ms/s by its reported elapsed duration, and retain only matching PID/start-time identities. Missing tasks are null, never assumed idle. Without root, every gpu_time_ms and its window are null, and skipped gives `sudo hostvitals now --seconds SECONDS --top N`; powermetrics is never launched. A failed or unsupported task report skips GPU time alone. CLI reports are bounded to {const:MEASUREMENT_LIMIT_MIB} MiB and their sampling Window plus {const:MEASUREMENT_TIMEOUT_SECONDS} seconds; all concurrent readers finish before now exits. hostvitals never runs sudo.
+    ///
     /// A missing, failing, oversized or unrecognized nettop report skips network as a whole, retaining CPU and memory. host.network.window_seconds and every network rate are null; network rankings are empty. `skipped` names network with its reason and retry command. Partial byte changes use network.bytes_in_per_second or network.bytes_out_per_second for affected process counts, and host.network equivalents for affected host directions.
     ///
     /// `skipped` entries have `measurement`, `count` (affected processes or host fields), `reason`, and `fix`. Without root, other users' footprints are null and get one combined entry with `sudo hostvitals now`; their CPU and resident memory remain readable and ranked. Own-process rusage failures are separately aggregated. A missing private responsibility interface needs an updated hostvitals, rather than invented App attribution. Explicit HOSTVITALS_PROBE_FIXTURES native fixtures are labelled source fixtures and warned on stderr; missing fixtures never fall back to live reads.
@@ -116,7 +126,7 @@ pub(crate) enum Command {
     ///
     /// Each check has `name`, `kind` (`cli` or `direct`), and `status` (`available`, `unavailable`, or `skipped`). An unavailable or skipped check also has `reason` and `fix`, a command to retry or enable the read; `guidance`, when present, explains an interface change. A missing executable uses a PATH repair. A CLI failure includes its exit status and bounded stderr. A probe is stopped after {const:PROBE_TIMEOUT_SECONDS} seconds. Private interfaces can change: they are reported unavailable, never substituted with invented readings. An unavailable private interface may need a newer hostvitals; root does not repair a missing interface.
     ///
-    /// Available direct checks also have `data`. `rusage`: `resident_bytes` (RAM), `footprint_bytes` (charged memory), `peak_footprint_bytes` (lifetime peak), `read_bytes` and `written_bytes` (cumulative disk I/O), and `energy_nj` (cumulative energy in nanojoules), for this process. `libproc`: `pid`, `resident_bytes`, and `threads` for this process. `ioreport`: `energy_channels` discovered and `sampled_channels` actually read, both channel counts, not watts. `responsibility`: this process's `pid` and responsible `app_pid`; a process with no other responsible process is its own App.
+    /// Available direct checks also have `data`. `rusage`: `resident_bytes` (RAM), `footprint_bytes` (charged memory), `peak_footprint_bytes` (lifetime peak), `read_bytes` and `written_bytes` (cumulative disk I/O), and `energy_nj` (cumulative energy in nanojoules), for this process. `libproc`: `pid`, `resident_bytes`, and `threads` for this process. `ioreport`: `energy_channels` discovered and `sampled_channels` actually read, both channel counts, not watts. CPU energy must also advance over a short probe; zero or stale CPU counters are reported unavailable because discovery, sampling and positive lifetime values alone do not establish readable Power. Other components can still be readable in now. `responsibility`: this process's `pid` and responsible `app_pid`; a process with no other responsible process is its own App.
     ///
     /// Root-only probes are skipped without executing them. To take those reads, run `sudo hostvitals doctor` yourself. It never asks for credentials. If a CLI probe is denied, run its check again as root yourself; if the interface is unavailable on this macOS version, retry after updating hostvitals. All findings are returned together with exit zero; only an invalid invocation or unreadable host identity refuses the command.
     ///
@@ -208,6 +218,10 @@ pub(crate) fn manual() -> Help {
         .constant(
             "FINDING_RESIDENT_PERCENT",
             hostvitals_policy::findings::PROCESS_RESIDENT_PERCENT,
+        )
+        .constant(
+            "FINDING_CPU_SPEED_LIMIT",
+            hostvitals_policy::findings::CPU_SPEED_LIMIT_PERCENT,
         )
         .constant(
             "FINDING_CPU_CORES",

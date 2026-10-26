@@ -423,7 +423,12 @@ fn now_measures_the_window_and_ranks_root_memory_and_responsible_apps() {
             < 0.01
     );
     let skipped = a["skipped"].as_array().unwrap();
-    assert_eq!(skipped.len(), 1, "{skipped:?}");
+    assert_eq!(skipped.len(), 4, "{skipped:?}");
+    for measurement in ["footprint", "disk", "apps.disk.read_bytes", "apps.disk.written_bytes"] {
+        let record = skipped.iter().find(|s| s["measurement"] == measurement).unwrap();
+        assert_eq!(record["count"], 2);
+        assert!(record["fix"].as_str().unwrap().starts_with("sudo hostvitals now"));
+    }
     assert_eq!(skipped[0]["count"], 2);
     assert_eq!(skipped[0]["fix"], "sudo hostvitals now");
 }

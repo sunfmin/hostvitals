@@ -16,7 +16,7 @@ pub(crate) mod nettop;
 mod pmset;
 mod powermetrics;
 pub(crate) mod ps;
-mod sample;
+pub mod sample;
 mod top;
 pub(crate) mod vmmap;
 
@@ -99,6 +99,7 @@ pub struct StandIn {
     pub delay_ms: u64,
     pub stdout: String,
     pub stdout_readings: Vec<String>,
+    pub report: Option<String>,
 }
 
 /// Captures a measurement with bounded output and time; truncated reports are never parsed.

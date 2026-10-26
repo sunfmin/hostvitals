@@ -18,6 +18,15 @@ fn main() {
         .unwrap_or_else(|| state.stdout.clone());
     fs::write(path, serde_json::to_vec(&state).unwrap()).unwrap();
     std::thread::sleep(std::time::Duration::from_millis(state.delay_ms));
+    if matches!(tool, Tool::Sample)
+        && let Some(flag) = args
+            .iter()
+            .position(|arg| arg == hostvitals::tools::sample::REPORT_FLAG)
+        && let Some(destination) = args.get(flag + 1)
+        && destination != "/dev/null"
+    {
+        fs::write(destination, state.report.as_deref().unwrap_or(&stdout)).unwrap();
+    }
     eprint!("{}", state.stderr);
     print!("{stdout}");
     std::process::exit(state.exit_code);

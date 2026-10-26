@@ -1,0 +1,17 @@
+Analysis of sampling worker (pid 123) every 1 millisecond
+Process:         worker [123]
+Call graph:
+    100 Thread_1   DispatchQueue_1: com.apple.main-thread (serial)
+    + 100 start  (in dyld) + 1 [0x1000]
+    +   100 main  (in worker) + 4 [0x1004]
+    +     80 crunch(int)  (in worker) + 8 [0x1008]
+    +     20 other  (in worker) + 12 [0x1012]
+    100 Thread_2
+      100 start  (in libsystem_pthread.dylib) + 1 [0x2000]
+        100 worker  (in worker) + 2 [0x2004]
+          100 crunch(int)  (in worker) + 16 [0x1016]
+Total number in stack (recursive counted multiple, when >=5):
+        crunch(int) 180
+Sort by top of stack, same collapsed (when >= 5):
+        crunch(int) 180
+Binary Images:

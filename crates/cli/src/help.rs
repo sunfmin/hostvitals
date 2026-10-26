@@ -5,7 +5,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 
 /// Observes a Mac's CPU, memory, disk, network and energy, read-only.
 ///
-/// Runs on macOS only, on arm64 and x86_64. Run `hostvitals doctor` first to see which measurements can be read here. Every command only reads; none changes anything. The commands themselves show what can be observed, so there is no separate dry-run mode.
+/// Runs on macOS only, on arm64 and x86_64. Run `hostvitals doctor` first to see which measurements can be read here. Every command only observes the Process; none changes its behaviour. Profile writes its raw sample report under $TMPDIR/hostvitals/ for the caller to read and remove; other commands save no reports. The commands themselves show what can be observed, so there is no separate dry-run mode.
 ///
 /// Never runs `sudo` itself, installs anything or prompts. A measurement needing root is listed as `skipped`, with the line that takes it; the caller decides whether to run that line. No daemon, saved history or cache: each invocation observes one window and exits.
 ///
@@ -19,6 +19,31 @@ pub(crate) struct Cli {
 
 #[derive(Subcommand)]
 pub(crate) enum Command {
+    /// Samples one Process's call stacks and retains its full sample report.
+    ///
+    /// Run `hostvitals profile 123 --seconds 5 --top 10`. Uses Apple's entitled sample tool; never controls the Process or runs sudo. PID is 1..2147483647. --seconds and --top are positive whole numbers, defaulting to {const:PROFILE_DEFAULT_SECONDS} and {const:PROFILE_DEFAULT_TOP}. The sampling interval is one millisecond.
+    ///
+    /// Answers `pid`, `seconds` (requested Window, not measured elapsed time), `top` (limit per ranking), `status` (available or skipped), and `report_path` (retained full report, or null if none). Available answers also have `total_samples`, `waiting_samples`, `mostly_waiting`, `observation` (plain-language summary), `partial`, `diagnostic` (sample's bounded failure reason, otherwise null), `hot_paths`, and `top_frames`.
+    ///
+    /// Each hot path has `frames` (root to leaf, including image names), `sample_count` (exclusive count), and `share` (fraction of all thread samples, 0..1). Matching paths are combined across threads. Top-frame items have `frame` and `sample_count`, combining exclusive leaf counts across all threads, including waits and recursion without double counting. Rankings descend by count and break ties lexically. They include small counts omitted by sample's thresholded tables. Counts describe thread samples, not CPU percentages or elapsed time; sleeping threads count too.
+    ///
+    /// `mostly_waiting` means more than half the samples end in recognized kernel wait, sleep, lock or event symbols. Such paths are excluded from hot_paths but remain in top_frames and the share denominator. Other kernel calls are not assumed to be waits. A missing graph footer or failed sample exit marks useful observations partial; a Process ending during sampling still returns its observed stacks, even when sample exits unsuccessfully. A completed report can cover less than the requested Window.
+    ///
+    /// Writes a distinct owner-only report (0600) in a private directory (0700) under $TMPDIR/hostvitals/ (the system temporary directory when TMPDIR is unset). Summarizes those same retained bytes, never sample's progress output. The caller can read report_path after exit and should remove its containing profile directory when finished. Temporary storage can be purged by macOS; it is not durable history. Doctor still discards its sample report. An unsafe existing hostvitals directory is refused rather than reused.
+    ///
+    /// Skipped answers have `reason` and `fix`, with no invented zero counts or rankings, and exit zero. Permission denial names `sudo hostvitals profile PID --seconds N --top N` for the caller; protected Processes may remain unreadable as root. Missing sample names a PATH repair; malformed reports name an update. Retained but unreadable or malformed reports still have report_path. Reports over {const:MEASUREMENT_LIMIT_MIB} MiB are retained but skipped; sample execution is bounded to the requested seconds plus {const:PROFILE_GRACE_SECONDS} seconds. Invalid arguments refuse with error and a help command.
+    #[command(next_help_heading = "Run by the agent", verbatim_doc_comment)]
+    Profile {
+        /// Positive process ID to observe.
+        #[arg(value_parser = clap::value_parser!(u32).range(1..=2147483647))]
+        pid: u32,
+        /// Requested sampling Window in whole seconds.
+        #[arg(long, default_value_t = crate::profile::DEFAULT_SECONDS, value_parser = clap::value_parser!(u64).range(1..))]
+        seconds: u64,
+        /// Maximum entries in each ranking.
+        #[arg(long, default_value_t = crate::profile::DEFAULT_TOP, value_parser = clap::value_parser!(u32).range(1..))]
+        top: u32,
+    },
     /// Observes one process whole, with its command arguments redacted.
     ///
     /// Run `hostvitals process 123 --seconds 3`. Reads two ps inventories and accessible native counters, exact KERN_PROCARGS2 arguments, task thread count, responsible App and lsof files/sockets. Root also runs fs_usage over the window. Only observes; saves nothing. PID is 1..2147483647 and --seconds is a positive whole number (default {const:PROCESS_DEFAULT_SECONDS}). A missing, exited or replaced PID refuses with its PID and a retry line; mandatory ps failure also refuses.
@@ -121,7 +146,7 @@ pub(crate) enum Command {
     /// With no topic, answers the index. `hostvitals help doctor` opens the doctor's help. An unknown topic refuses with a line to open the index.
     #[command(next_help_heading = "Run by the agent", verbatim_doc_comment)]
     Help {
-        /// `doctor`, `now`, `memory`, or `process` for a command, `all` for the full manual, or omit for the index.
+        /// A command name, `all` for the full manual, or omit for the index.
         #[arg(verbatim_doc_comment)]
         topic: Option<String>,
     },
@@ -149,6 +174,9 @@ fn top(value: &str) -> Result<std::num::NonZeroUsize, String> {
 pub(crate) fn manual() -> Help {
     Help::new(Cli::command())
         .table::<Tool>("tools")
+        .constant("PROFILE_DEFAULT_SECONDS", crate::profile::DEFAULT_SECONDS)
+        .constant("PROFILE_DEFAULT_TOP", crate::profile::DEFAULT_TOP)
+        .constant("PROFILE_GRACE_SECONDS", crate::tools::sample::GRACE_SECONDS)
         .constant("PROCESS_DEFAULT_SECONDS", crate::process::DEFAULT_SECONDS)
         .constant("ARGUMENT_LIMIT_MIB", crate::direct::arguments::LIMIT_MIB)
         .constant("LOOKUP_SECONDS", crate::tools::names::DEADLINE_SECONDS)

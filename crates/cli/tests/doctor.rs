@@ -172,6 +172,8 @@ fn unprivileged_doctor_reads_available_clis_but_never_launches_root_tools() {
             assert_ne!(lab.calls(tool.name())[0], ["-h"]);
         }
     }
+    let sample_calls = lab.calls("sample");
+    assert_eq!(&sample_calls[0][1..], ["1", "10", "-file", "/dev/null"]);
 }
 
 #[test]

@@ -10,6 +10,8 @@ pub struct ProcessUsage {
     pub peak_footprint_bytes: Option<u64>,
     pub bytes_in_per_second: Option<f64>,
     pub bytes_out_per_second: Option<f64>,
+    pub disk_read_bytes: Option<u64>,
+    pub disk_written_bytes: Option<u64>,
 }
 pub struct AppUsage {
     pub energy_impact: Option<f64>,
@@ -21,6 +23,8 @@ pub struct AppUsage {
     pub peak_footprint_bytes: Option<u64>,
     pub bytes_in_per_second: Option<f64>,
     pub bytes_out_per_second: Option<f64>,
+    pub disk_read_bytes: Option<u64>,
+    pub disk_written_bytes: Option<u64>,
 }
 
 /// Unknown attribution is excluded; unknown measurements propagate into their App total.
@@ -38,8 +42,12 @@ pub fn summarize(processes: &[ProcessUsage]) -> Vec<AppUsage> {
                 peak_footprint_bytes: Some(0),
                 bytes_in_per_second: Some(0.0),
                 bytes_out_per_second: Some(0.0),
+                disk_read_bytes: Some(0),
+                disk_written_bytes: Some(0),
             });
             app.process_count = app.process_count.saturating_add(1);
+            app.disk_read_bytes = super::add_bytes(app.disk_read_bytes, p.disk_read_bytes);
+            app.disk_written_bytes = super::add_bytes(app.disk_written_bytes, p.disk_written_bytes);
             app.cpu_percent = super::add_rates(app.cpu_percent, p.cpu_percent);
             app.energy_impact = super::add_rates(app.energy_impact, p.energy_impact);
             app.bytes_in_per_second =

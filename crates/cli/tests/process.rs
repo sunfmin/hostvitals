@@ -450,7 +450,7 @@ fn live_native_argv_keeps_boundaries_withholds_environment_and_reads_real_open_f
             .as_array()
             .unwrap()
             .iter()
-            .any(|f| f["path"] == file.to_str().unwrap())
+            .any(|f| f["path"] == fs::canonicalize(&file).unwrap().to_str().unwrap())
     );
     assert_eq!(
         fs::canonicalize(a["cwd"].as_str().unwrap()).unwrap(),

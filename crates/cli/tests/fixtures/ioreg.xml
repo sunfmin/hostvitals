@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><array>
+<dict>
+  <key>IOObjectClass</key><string>IOBlockStorageDriver</string>
+  <key>IORegistryEntryID</key><integer>4294970030</integer>
+  <key>Statistics</key><dict>
+    <key>Bytes (Read)</key><integer>1000</integer>
+    <key>Bytes (Write)</key><integer>2000</integer>
+  </dict>
+  <key>IORegistryEntryChildren</key><array><dict>
+    <key>Statistics</key><dict>
+      <key>Bytes (Read)</key><integer>9999999</integer>
+      <key>Bytes (Write)</key><integer>9999999</integer>
+    </dict>
+  </dict></array>
+</dict>
+</array></plist>

@@ -4,6 +4,7 @@ extern crate flux_core;
 
 use flux_rs::attrs::*;
 pub mod apps;
+pub mod disk;
 pub mod energy;
 pub mod files;
 pub mod findings;

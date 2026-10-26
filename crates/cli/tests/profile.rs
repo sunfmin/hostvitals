@@ -179,6 +179,35 @@ fn denied_missing_and_malformed_reads_are_skipped_with_retry_lines_and_no_fake_c
         "unrecognized report"
     );
 
+    for report in ["", "Call graph:\n\nBinary Images:\n"] {
+        lab.write(json!({"report":report}));
+        let (out, answer) = lab.run(&["profile", "123"]);
+        assert!(out.status.success());
+        assert_eq!(answer["status"], "skipped");
+        assert!(
+            answer["reason"]
+                .as_str()
+                .unwrap()
+                .contains("no call stacks collected")
+        );
+        assert_eq!(answer["fix"], "hostvitals profile 123 --seconds 5 --top 10");
+        for key in [
+            "total_samples",
+            "waiting_samples",
+            "mostly_waiting",
+            "hot_paths",
+            "top_frames",
+        ] {
+            assert!(answer.get(key).is_none(), "{key}: {answer}");
+        }
+        let path = answer["report_path"].as_str().unwrap();
+        assert_eq!(fs::read_to_string(path).unwrap(), report);
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
     fs::remove_file(lab.0.join("bin/sample")).unwrap();
     let (out, answer) = lab.run(&["profile", "123"]);
     assert!(out.status.success());

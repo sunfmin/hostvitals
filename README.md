@@ -2,7 +2,21 @@
 
 A read-only macOS agent CLI for host and process observations. Start with `hostvitals --help`, then `hostvitals doctor`; `hostvitals help all` opens the complete manual. Doctor inventories observation capabilities. `hostvitals now --seconds 3 --top 10` measures host CPU, memory and network, every user's processes, responsible App totals and eight rankings in one window. Other users' CPU, resident memory and network bytes are included without root; footprint reads that need elevation are explicitly skipped. `hostvitals memory <pid> [--top 15]` explains one Process's Footprint, region kinds, malloc zones and largest regions; `hostvitals memory --help` documents every output key and the size ranking.
 
-Build locally with `cargo build --locked -p hostvitals` on macOS arm64 or x86_64. Stable Rust builds the binary; the pinned nightly runs the verification gate. `./gate.sh` is the same gate locally and in CI: format, Flux alone (no trusted or ignored functions), clippy, then nextest. The checker versions and nightly live in `Cargo.toml`; `./verify.sh` rejects mismatches with installation instructions. Install nextest with `brew install cargo-nextest`.
+Install on macOS arm64 or x86_64:
+
+```sh
+brew install sunfmin/tap/hostvitals
+```
+
+For an AI agent, install the skill that points to the tool's help:
+
+```sh
+npx skills add sunfmin/hostvitals
+```
+
+Some measurements need root and are skipped without it. hostvitals never runs `sudo` itself; `hostvitals doctor` reports the observation capabilities here and the fixes for anything missing.
+
+Build locally with `cargo build --locked -p hostvitals` on macOS arm64 or x86_64. Stable Rust builds the binary; the pinned nightly runs the verification gate. `./gate.sh` is the same gate locally and in CI: format, Flux alone (no trusted or ignored functions), clippy, release packaging checks, then nextest. The checker versions and nightly live in `Cargo.toml`; `./verify.sh` rejects mismatches with installation instructions. Install nextest with `brew install cargo-nextest`.
 
 The effect crate owns native reads, CLI execution and JSON. The policy crate has no I/O and every function passes Flux. Real-binary integration tests substitute a cargo example for each Apple CLI on PATH. Build that stand-in with `cargo build --example probe-cli` before running an individual integration test; the gate builds it automatically.
 
@@ -15,3 +29,5 @@ The `now` integration tests use the same fixture source with `now-host-0.json` a
 Network reads use `nettop -L 1 -n -P -x -J bytes_in,bytes_out` twice, with no DNS lookup or remote requests. `host.network.window_seconds` is the actual monotonic interval used by every `network.bytes_in_per_second` and `network.bytes_out_per_second` rate. Host throughput sums TCP and UDP process accounting across all interfaces, including loopback and proxy accounting; it is not a physical-link rate. Rankings cover Processes and Apps in both directions. Changed identities, one-sided readings and regressed counters stay null, propagate into App and host totals, and are explained in `skipped`. No sockets at either snapshot means zero for a stable Process; sockets entirely between snapshots can be missed. A failed or malformed nettop report skips network while retaining CPU and memory. Tests cover root traffic, responsible App sums, different incoming/outgoing rankings, column order, comma/dot names, delayed reads, 64-bit counters, null propagation, malformed reports and missing or failing nettop.
 
 [GLOSSARY.md](GLOSSARY.md) defines the domain language. [docs/adr](docs/adr) records the platform, source, read-only and scope decisions.
+
+The fleet cuts releases on an Apple Silicon Mac with Rosetta and stable Rust's `aarch64-apple-darwin` and `x86_64-apple-darwin` targets. The release sequence lives in [the fleet's cut configuration](docs/agents/afkconvoy.md); `packaging/release.sh` lists the individual operations. The formula is generated from the archives, with their URLs and SHA-256 hashes, and pushed to `sunfmin/homebrew-tap`.

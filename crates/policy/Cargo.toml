@@ -17,3 +17,6 @@ check_overflow = "strict"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(flux)'] }
+
+[dev-dependencies]
+proptest = "1"

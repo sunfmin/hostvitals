@@ -112,12 +112,14 @@ fn doctor_reports_every_missing_cli() {
         "pmset",
         "powermetrics",
         "fs_usage",
+        "lsof",
+        "dscacheutil",
     ] {
         let check = checks.iter().find(|c| c["name"] == name).unwrap();
         assert_eq!(check["status"], "unavailable", "{name}");
         assert!(check["fix"].as_str().unwrap().contains("PATH"), "{check}");
     }
-    assert_eq!(checks.len(), 14);
+    assert_eq!(checks.len(), hostvitals::tools::Tool::all().len() + 4);
 }
 
 impl Lab {
@@ -170,6 +172,8 @@ fn unprivileged_doctor_reads_available_clis_but_never_launches_root_tools() {
             assert_ne!(lab.calls(tool.name())[0], ["-h"]);
         }
     }
+    let sample_calls = lab.calls("sample");
+    assert_eq!(&sample_calls[0][1..], ["1", "10", "-file", "/dev/null"]);
 }
 
 #[test]

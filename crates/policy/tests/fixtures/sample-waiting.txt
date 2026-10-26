@@ -1,0 +1,10 @@
+Analysis of sampling worker (pid 123) every 1 millisecond
+Call graph:
+    100 Thread_1
+      100 start  (in dyld) + 1 [0x1]
+        90 run_loop  (in worker) + 4 [0x4]
+          90 mach_msg2_trap  (in libsystem_kernel.dylib) + 8 [0x8]
+        10 read  (in libsystem_kernel.dylib) + 8 [0x12]
+Total number in stack (recursive counted multiple, when >=5):
+Sort by top of stack, same collapsed (when >= 5):
+Binary Images:

@@ -5,7 +5,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 
 /// Observes a Mac's CPU, memory, disk, network and energy, read-only.
 ///
-/// Runs on macOS only, on arm64 and x86_64. Run `hostvitals doctor` first to see which measurements can be read here. Every command only reads; none changes anything. The commands themselves show what can be observed, so there is no separate dry-run mode.
+/// Runs on macOS only, on arm64 and x86_64. Run `hostvitals doctor` first to see which measurements can be read here. Every command only observes the Process; none changes its behaviour. Profile writes its raw sample report under $TMPDIR/hostvitals/ for the caller to read and remove; other commands save no reports. The commands themselves show what can be observed, so there is no separate dry-run mode.
 ///
 /// Never runs `sudo` itself, installs anything or prompts. A measurement needing root is listed as `skipped`, with the line that takes it; the caller decides whether to run that line. No daemon, saved history or cache: each invocation observes one window and exits.
 ///
@@ -19,19 +19,78 @@ pub(crate) struct Cli {
 
 #[derive(Subcommand)]
 pub(crate) enum Command {
-    /// Measures CPU and memory over one window for the host, every user's processes and their Apps.
+    /// Samples one Process's call stacks and retains its full sample report.
     ///
-    /// Run `hostvitals now --seconds 3 --top 10`. Reads two all-user `ps` snapshots, cumulative host CPU ticks, memory sysctls, process responsibility, and accessible rusage footprints. Only reads; saves nothing. `--seconds` and `--top` require a whole number at least 1. Refusals name the corrected command. Missing or malformed process or host snapshots refuse with a retry line; optional native reads are null with a `skipped` entry.
+    /// Run `hostvitals profile 123 --seconds 5 --top 10`. Uses Apple's entitled sample tool; never controls the Process or runs sudo. PID is 1..2147483647. --seconds and --top are positive whole numbers, defaulting to {const:PROFILE_DEFAULT_SECONDS} and {const:PROFILE_DEFAULT_TOP}. The sampling interval is one millisecond.
+    ///
+    /// Answers `pid`, `seconds` (requested Window, not measured elapsed time), `top` (limit per ranking), `status` (available or skipped), and `report_path` (retained full report, or null if none). Available answers also have `total_samples`, `waiting_samples`, `mostly_waiting`, `observation` (plain-language summary), `partial`, `diagnostic` (sample's bounded failure reason, otherwise null), `hot_paths`, and `top_frames`.
+    ///
+    /// Each hot path has `frames` (root to leaf, including image names), `sample_count` (exclusive count), and `share` (fraction of all thread samples, 0..1). Matching paths are combined across threads. Top-frame items have `frame` and `sample_count`, combining exclusive leaf counts across all threads, including waits and recursion without double counting. Rankings descend by count and break ties lexically. They include small counts omitted by sample's thresholded tables. Counts describe thread samples, not CPU percentages or elapsed time; sleeping threads count too.
+    ///
+    /// `mostly_waiting` means more than half the samples end in recognized kernel wait, sleep, lock or event symbols. Such paths are excluded from hot_paths but remain in top_frames and the share denominator. Other kernel calls are not assumed to be waits. A missing graph footer or failed sample exit marks useful observations partial; a Process ending during sampling still returns its observed stacks, even when sample exits unsuccessfully. A completed report can cover less than the requested Window.
+    ///
+    /// Writes a distinct owner-only report (0600) in a private directory (0700) under $TMPDIR/hostvitals/ (the system temporary directory when TMPDIR is unset). Summarizes those same retained bytes, never sample's progress output. The caller can read report_path after exit and should remove its containing profile directory when finished. Temporary storage can be purged by macOS; it is not durable history. Doctor still discards its sample report. An unsafe existing hostvitals directory is refused rather than reused.
+    ///
+    /// Skipped answers have `reason` and `fix`, with no invented zero counts or rankings, and exit zero. Permission denial names `sudo hostvitals profile PID --seconds N --top N` for the caller; protected Processes may remain unreadable as root. Missing sample names a PATH repair; malformed reports name an update. Retained but unreadable or malformed reports still have report_path. Reports over {const:MEASUREMENT_LIMIT_MIB} MiB are retained but skipped; sample execution is bounded to the requested seconds plus {const:PROFILE_GRACE_SECONDS} seconds. Invalid arguments refuse with error and a help command.
+    #[command(next_help_heading = "Run by the agent", verbatim_doc_comment)]
+    Profile {
+        /// Positive process ID to observe.
+        #[arg(value_parser = clap::value_parser!(u32).range(1..=2147483647))]
+        pid: u32,
+        /// Requested sampling Window in whole seconds.
+        #[arg(long, default_value_t = crate::profile::DEFAULT_SECONDS, value_parser = clap::value_parser!(u64).range(1..))]
+        seconds: u64,
+        /// Maximum entries in each ranking.
+        #[arg(long, default_value_t = crate::profile::DEFAULT_TOP, value_parser = clap::value_parser!(u32).range(1..))]
+        top: u32,
+    },
+    /// Observes one process whole, with its command arguments redacted.
+    ///
+    /// Run `hostvitals process 123 --seconds 3`. Reads two ps inventories and accessible native counters, exact KERN_PROCARGS2 arguments, task thread count, responsible App and lsof files/sockets. Root also runs fs_usage over the window. Only observes; saves nothing. PID is 1..2147483647 and --seconds is a positive whole number (default {const:PROCESS_DEFAULT_SECONDS}). A missing, exited or replaced PID refuses with its PID and a retry line; mandatory ps failure also refuses.
+    ///
+    /// Answers `source` (host or explicitly labelled fixtures), `pid`, `parent_pid`, `uid`, `user`, `name` (executable basename), `started_at` (UTC ps start time), `app`, `command_line`, `cwd`, `cpu_seconds` (cumulative), `cpu_percent` (window change; one core is 100%), `window_seconds` (actual monotonic CPU interval), `resident_bytes`, `footprint_bytes`, `peak_footprint_bytes` (lifetime), `disk`, `energy_nj` (cumulative nanojoules), `threads`, `open_files`, `sockets`, `file_activity`, and `skipped`.
+    ///
+    /// `app` has `app_pid`, `name` and `started_at`; unreadable/exited App identity leaves its latter fields null. Attribution uses macOS responsibility, never the parent. `command_line` is an array preserving argv boundaries, empty arguments and public values; invalid UTF-8 uses replacement characters. A flag containing {const:SECRET_FLAG_WORDS} (any case) has its equals-form or next-argument value replaced by <redacted>, even when empty or flag-like. URL userinfo is replaced by <redacted>. This is flag/URL redaction, not detection of secrets inside arbitrary scripts or public positional text.
+    ///
+    /// hostvitals asks for process arguments and parses only the argc-delimited vector. It never interprets, returns, logs or keeps any environment entry. The kernel buffer is bounded to {const:ARGUMENT_LIMIT_MIB} MiB and released immediately after sanitizing argv; environment bytes can transiently enter memory. Arguments are never reconstructed from ps.
+    ///
+    /// `disk` has cumulative `read_bytes`, `written_bytes`, `window_read_bytes`, `window_written_bytes`, and its actual `window_seconds` (native readings can differ slightly from the CPU interval). Regressed counters give null window changes with a skipped entry. Energy is a cumulative counter, not watts or an energy-impact score.
+    ///
+    /// `open_files` items have `fd`, `kind` and `path`; excludes cwd and sockets, includes executable/mapped files and descriptors. `sockets` items have `fd`, `kind`, `protocol`, `local`, `remote_ip`, `remote_port`, `remote_name`, and `state`. IPv4/IPv6 remote addresses and ports remain numeric; local and Unix socket endpoints retain lsof's text. Listening/unconnected/Unix sockets have null remote fields. Reverse lookups use one shared deadline of {const:LOOKUP_SECONDS} seconds for all distinct remote IPs; a failed or timed-out name stays the IP. Lookups may send DNS requests. Empty arrays mean observed empty lists, never denied reads.
+    ///
+    /// `file_activity` is root-only fs_usage read/write events over the requested window: items have `operation`, `path`, and `bytes` (requested byte count, null if absent). Paths can contain spaces; the counters in disk remain authoritative byte accounting. Paths absent from an event are resolved from an initial lsof descriptor reading and subsequent open/close events; duplication clears uncertain associations. Unresolved paths are null with a skipped entry. This is a best-effort trace of a changing process, not a durable file audit. fs_usage can lose events and reports this as skipped, never a complete empty list. Other filesystem operations are excluded.
+    ///
+    /// Optional denied, missing or malformed readings are null with `skipped` entries (`measurement`, `reason`, `fix`). Non-root callers observing another user's process receive only ps identity, resident and CPU; all other fields are skipped with `sudo hostvitals process PID --seconds N`. fs_usage is skipped unless already root. hostvitals never runs sudo. Protected processes may remain unreadable as root. Missing tools name a PATH repair; unsupported reports/private interfaces name an update. CLI reports are bounded to 32 MiB and 30 seconds; fs_usage is bounded to its window plus five seconds. Explicit fixture reads never fall back to the host.
+    #[command(next_help_heading = "Run by the agent", verbatim_doc_comment)]
+    Process {
+        /// Positive process ID to observe.
+        #[arg(value_parser = clap::value_parser!(u32).range(1..=2147483647))]
+        pid: u32,
+        /// Minimum observation window in whole seconds.
+        #[arg(long, default_value_t = crate::process::DEFAULT_SECONDS, value_parser = clap::value_parser!(u64).range(1..))]
+        seconds: u64,
+    },
+    /// Measures CPU, memory and network over one window for the host, every user's processes and their Apps.
+    ///
+    /// Run `hostvitals now --seconds 3 --top 10`. Reads two all-user `ps` and `nettop` snapshots, cumulative host CPU ticks, memory sysctls, process responsibility, and accessible rusage footprints. Only reads; saves nothing. `--seconds` and `--top` require a whole number at least 1. Refusals name the corrected command. Missing or malformed process or host snapshots refuse with a retry line; optional native and network reads are null with a `skipped` entry.
     ///
     /// Answers `source` (`host` or `fixtures`), `window_seconds` (actual monotonic time between process readings), `host`, `processes` (the entire final snapshot), `apps` (totals of those processes), `rankings` and `skipped`. Host CPU covers the same window with minor snapshot collection skew. CPU percentages for processes and Apps use one logical core as 100%, so multithreaded work can exceed 100%. Host percentages cover all cores and total 100%.
     ///
     /// `host.cpu` has `user_percent` (including nice), `system_percent`, `idle_percent`, `logical_cores` and `physical_cores`. `host.load_average` is the 1, 5 and 15 minute load. `host.memory` has `total_bytes`, `free_percent` (kern.memorystatus_level, not a resident-memory subtraction), `pressure` (normal, warn or critical), `swap_used_bytes`, `swap_total_bytes`, and `compressed_bytes` (physical compressed storage). Memory and load are read at the end of the window.
     ///
+    /// `host.network` has `window_seconds` (actual monotonic time between the two nettop readings), `bytes_in_per_second` (received), and `bytes_out_per_second` (sent). All network rates divide cumulative-byte changes by this interval; requested --seconds is never used as the divisor. Collection causes minor skew relative to the CPU window. Host network sums nettop's per-process accounting for TCP and UDP on all interfaces, including loopback; proxy or forwarded traffic may be accounted to multiple processes. It is not a physical-link speed. No address or far-end names are requested: nettop runs with -n and process summaries only, so now performs no DNS lookup and sends no network requests. No connection details or remote names are returned.
+    ///
     /// Each process has `pid`, `parent_pid`, `uid`, `user`, `name` (executable name, no arguments), `started_at` (ps start time in UTC), `cpu_percent`, `resident_bytes`, `footprint_bytes`, `peak_footprint_bytes` (lifetime peak), and `app_pid` (responsible process). PID plus start time identifies a process. CPU is cumulative-time change over the window, never ps's lifetime percentage. A process absent at the first reading, a reused PID or a regressed counter has null CPU and is counted in `skipped`; an exited process is absent from the final snapshot. ps's hundredth-second CPU precision limits short-window accuracy.
     ///
     /// Each App has `app_pid`, `name`, `started_at`, `process_count`, `cpu_percent`, `resident_bytes`, `footprint_bytes`, and `peak_footprint_bytes`. Totals sum their processes; any missing input makes that total null. Peak is the sum of lifetime process peaks, not a simultaneous App peak. Apps follow macOS responsibility, never a name or parent heuristic. No other responsible process means its own App. An exited responsible process retains its app_pid with null name and started_at; an unreadable responsibility yields null app_pid and is skipped from App totals.
     ///
+    /// Every process and App also has `network`, with `bytes_in_per_second` and `bytes_out_per_second`, using host.network.window_seconds. Network includes other users and root processes without elevation. Matching PID and start time is required; a new or reused PID, a process seen by nettop in only one reading, or a regressed byte counter yields null for the affected direction. No sockets in either nettop reading is zero for a process present throughout the window. Short-lived sockets entirely between snapshots may be missed. App rates propagate missing inputs independently for each direction. A missing process change makes that direction of the host rate null, including when a network process exited or could not be identified by ps; checked total overflow also yields null. No partial sum is presented as a complete rate.
+    ///
     /// `rankings` has `processes_by_cpu`, `processes_by_memory`, `apps_by_cpu`, `apps_by_memory`: each is up to `--top` full records, descending by cpu_percent or resident_bytes, tied by ascending PID. Null CPU is excluded from CPU rankings. Shared resident memory can be counted in multiple processes, so App resident totals are accounting sums, not unique physical RAM.
+    ///
+    /// Network rankings are `processes_by_network_in`, `processes_by_network_out`, `apps_by_network_in`, and `apps_by_network_out`. Each contains up to --top full records descending by the corresponding network bytes-per-second field, tied by ascending PID or app_pid. Null values are excluded; measured zeroes remain eligible.
+    ///
+    /// A missing, failing, oversized or unrecognized nettop report skips network as a whole, retaining CPU and memory. host.network.window_seconds and every network rate are null; network rankings are empty. `skipped` names network with its reason and retry command. Partial byte changes use network.bytes_in_per_second or network.bytes_out_per_second for affected process counts, and host.network equivalents for affected host directions.
     ///
     /// `skipped` entries have `measurement`, `count` (affected processes or host fields), `reason`, and `fix`. Without root, other users' footprints are null and get one combined entry with `sudo hostvitals now`; their CPU and resident memory remain readable and ranked. Own-process rusage failures are separately aggregated. A missing private responsibility interface needs an updated hostvitals, rather than invented App attribution. Explicit HOSTVITALS_PROBE_FIXTURES native fixtures are labelled source fixtures and warned on stderr; missing fixtures never fall back to live reads.
     #[command(next_help_heading = "Run by the agent", verbatim_doc_comment)]
@@ -87,7 +146,7 @@ pub(crate) enum Command {
     /// With no topic, answers the index. `hostvitals help doctor` opens the doctor's help. An unknown topic refuses with a line to open the index.
     #[command(next_help_heading = "Run by the agent", verbatim_doc_comment)]
     Help {
-        /// `doctor`, `now`, or `memory` for a command, `all` for the full manual, or omit for the index.
+        /// A command name, `all` for the full manual, or omit for the index.
         #[arg(verbatim_doc_comment)]
         topic: Option<String>,
     },
@@ -115,6 +174,16 @@ fn top(value: &str) -> Result<std::num::NonZeroUsize, String> {
 pub(crate) fn manual() -> Help {
     Help::new(Cli::command())
         .table::<Tool>("tools")
+        .constant("PROFILE_DEFAULT_SECONDS", crate::profile::DEFAULT_SECONDS)
+        .constant("PROFILE_DEFAULT_TOP", crate::profile::DEFAULT_TOP)
+        .constant("PROFILE_GRACE_SECONDS", crate::tools::sample::GRACE_SECONDS)
+        .constant("PROCESS_DEFAULT_SECONDS", crate::process::DEFAULT_SECONDS)
+        .constant("ARGUMENT_LIMIT_MIB", crate::direct::arguments::LIMIT_MIB)
+        .constant("LOOKUP_SECONDS", crate::tools::names::DEADLINE_SECONDS)
+        .constant(
+            "SECRET_FLAG_WORDS",
+            hostvitals_policy::redaction::SECRET_FLAG_WORDS.join(", "),
+        )
         .constant("PROBE_TIMEOUT_SECONDS", crate::tools::PROBE_TIMEOUT_SECONDS)
         .constant(
             "MEASUREMENT_TIMEOUT_SECONDS",

@@ -61,7 +61,7 @@ pub fn main(args: impl IntoIterator<Item = OsString>) -> ExitCode {
                 eprintln!("warning: native observations use explicit JSON fixtures");
             }
             match now::answer(&source, seconds, top) {
-                Ok(answer) => println!("{answer}"),
+                Ok(answer) => println!("{}", serde_json::to_string(&answer).unwrap()),
                 Err(error) => return refuse(error),
             }
         }

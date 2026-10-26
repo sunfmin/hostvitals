@@ -1,10 +1,11 @@
-//! Decisions about whether an observation may run, with no access to the host.
+//! Pure observation rules, parsers, totals and rankings, with no access to the host.
 extern crate flux_alloc;
 extern crate flux_core;
 
 use flux_rs::attrs::*;
 pub mod apps;
 pub mod files;
+pub mod findings;
 pub mod network;
 pub mod redaction;
 

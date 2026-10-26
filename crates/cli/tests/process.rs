@@ -545,18 +545,27 @@ fn malformed_trace_diagnostics_and_scoped_ipv6_are_handled_without_invented_read
 
 #[test]
 fn live_empty_argv_zero_never_causes_environment_to_be_parsed_as_an_argument() {
-    let child=Child(Command::new("/bin/bash").args(["-c","exec -a '' /bin/sh -c 'while :; do :; done'"])
-        .env_clear().env("PRIVATE_ENV_SENTINEL","PRIVATE_ENV_VALUE").spawn().unwrap());
+    let child = Child(
+        Command::new("/bin/bash")
+            .args(["-c", "exec -a '' /bin/sh -c 'while :; do :; done'"])
+            .env_clear()
+            .env("PRIVATE_ENV_SENTINEL", "PRIVATE_ENV_VALUE")
+            .spawn()
+            .unwrap(),
+    );
     std::thread::sleep(std::time::Duration::from_millis(50));
-    let out=Command::new(env!("CARGO_BIN_EXE_hostvitals")).args(["process",&child.0.id().to_string(),"--seconds","1"])
-        .env_remove("HOSTVITALS_PROBE_FIXTURES").output().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_hostvitals"))
+        .args(["process", &child.0.id().to_string(), "--seconds", "1"])
+        .env_remove("HOSTVITALS_PROBE_FIXTURES")
+        .output()
+        .unwrap();
     assert!(out.status.success());
-    for bytes in [&out.stdout,&out.stderr] {
+    for bytes in [&out.stdout, &out.stderr] {
         assert!(!String::from_utf8_lossy(bytes).contains("PRIVATE_ENV_SENTINEL"));
         assert!(!String::from_utf8_lossy(bytes).contains("PRIVATE_ENV_VALUE"));
     }
-    let a: Value=serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(a["command_line"][0],"");
-    assert_eq!(a["command_line"][1],"-c");
-    assert_eq!(a["command_line"][2],"while :; do :; done");
+    let a: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(a["command_line"][0], "");
+    assert_eq!(a["command_line"][1], "-c");
+    assert_eq!(a["command_line"][2], "while :; do :; done");
 }

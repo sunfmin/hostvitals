@@ -166,7 +166,7 @@ fn gpu_time_is_skipped_without_root_and_read_over_the_window_with_root() {
         }
         let standin=fs::read_link(lab.0.join("bin/ps")).unwrap();
         std::os::unix::fs::symlink(standin,lab.0.join("bin/powermetrics")).unwrap();
-        lab.write("powermetrics",json!({"stdout":"*** Sampled system activity (Mon Oct 26 2026) (1250.00ms elapsed) ***\n\nName ID CPU ms/s User% GPU ms/s\nApp with spaces 10 5.0 20.0 40.0\ndaemon 20 0.0 0.0 0.0\n\n"}));
+        lab.write("powermetrics",json!({"calls":[],"stdout":"*** Sampled system activity (Mon Oct 26 2026) (1250.00ms elapsed) ***\n\nName ID CPU ms/s User% GPU ms/s\nApp with spaces 10 5.0 20.0 40.0\ndaemon 20 0.0 0.0 0.0\n\n"}));
         let a=lab.answer();
         let state:Value=serde_json::from_slice(&fs::read(lab.0.join("powermetrics.json")).unwrap()).unwrap();
         if euid==0 {

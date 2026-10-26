@@ -6,6 +6,7 @@
 compile_error!("hostvitals supports macOS arm64 and x86_64 only");
 mod direct;
 mod doctor;
+mod energy;
 mod help;
 mod memory;
 mod now;

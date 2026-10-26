@@ -275,6 +275,182 @@ fn healthy_findings_are_first_and_app_sums_do_not_create_process_findings() {
 }
 
 #[test]
+fn ioreport_failure_retains_every_other_energy_observation() {
+    let rows = row(10, 501, "0:00.00", 1, "/App");
+    let lab = Lab::new(rows.clone(), rows);
+    lab.process(10, 10);
+    lab.write(
+        "now-power",
+        json!({"status":"unavailable","reason":"IOReport private symbol removed by fixture"}),
+    );
+    let a = lab.answer();
+    assert_eq!(a["processes"][0]["energy_impact"], 0.0);
+    assert_eq!(a["apps"][0]["energy_impact"], 0.0);
+    assert_eq!(a["host"]["battery"]["present"], false);
+    assert_eq!(a["host"]["thermal"]["cpu_throttled"], false);
+    assert_eq!(a["processes"][0]["cpu_percent"], 0.0);
+    assert_eq!(a["host"]["network"]["bytes_in_per_second"], 0.0);
+    let power = &a["host"]["power"];
+    for key in [
+        "window_seconds",
+        "cpu_watts",
+        "gpu_watts",
+        "ane_watts",
+        "gpu_active_share",
+    ] {
+        assert!(power[key].is_null());
+    }
+    let skipped = a["skipped"].as_array().unwrap();
+    assert_eq!(skipped.len(), 2);
+    let power_skip = skipped
+        .iter()
+        .find(|s| s["measurement"] == "power")
+        .unwrap();
+    assert!(
+        power_skip["reason"]
+            .as_str()
+            .unwrap()
+            .contains("symbol removed")
+    );
+    assert!(
+        power_skip["fix"]
+            .as_str()
+            .unwrap()
+            .contains("hostvitals doctor")
+    );
+}
+
+#[test]
+fn incomplete_energy_and_reused_process_ids_never_form_complete_app_scores() {
+    let before = row(10, 501, "0:00.00", 1, "/App")
+        + &row(11, 501, "0:00.00", 1, "/helper")
+        + &row(12, 501, "0:00.00", 1, "/old");
+    let after = before.replace("/old", "/replacement").replace(
+        "12 1 501 owner 0:00.00 1 Mon Oct 12",
+        "12 1 501 owner 0:00.00 1 Mon Oct 25",
+    );
+    let lab = Lab::new(before, after);
+    for pid in [10, 11, 12] {
+        lab.process(pid, 10);
+    }
+    lab.write(
+        "top",
+        json!({"stdout":"PID POWER\n10 0.0\nPID POWER\n10 10.0\n12 30.0\n"}),
+    );
+    let a = lab.answer();
+    assert_eq!(a["processes"][0]["energy_impact"], 10.0);
+    assert!(a["processes"][1]["energy_impact"].is_null());
+    assert!(a["processes"][2]["energy_impact"].is_null());
+    assert!(a["apps"][0]["energy_impact"].is_null());
+    assert_eq!(a["rankings"]["apps_by_energy"], json!([]));
+    assert_eq!(
+        a["rankings"]["processes_by_energy"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        a["skipped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["measurement"] == "energy_impact" && s["count"] == 2)
+    );
+}
+
+#[test]
+fn overflowing_app_energy_totals_are_unknown_and_excluded_from_rankings() {
+    let rows = row(10, 501, "0:00.00", 1, "/App") + &row(11, 501, "0:00.00", 1, "/helper");
+    let lab = Lab::new(rows.clone(), rows);
+    lab.process(10, 10);
+    lab.process(11, 10);
+    lab.write(
+        "top",
+        json!({"stdout":"PID POWER\n10 0\n11 0\nPID POWER\n10 1e308\n11 1e308\n"}),
+    );
+    let a = lab.answer();
+    assert!(a["apps"][0]["energy_impact"].is_null());
+    assert_eq!(a["rankings"]["apps_by_energy"], json!([]));
+    assert_eq!(
+        a["rankings"]["processes_by_energy"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn zero_accumulated_or_regressed_energy_counters_are_unknown_while_valid_idle_is_zero() {
+    let rows = row(10, 501, "0:00.00", 1, "/App");
+    let lab = Lab::new(rows.clone(), rows);
+    lab.process(10, 10);
+    lab.write("now-power",json!({"status":"available","data":{"window_seconds":1.0,"energy":[
+        {"name":"CPU Energy","unit":"mJ","value":0,"counter_before":0,"counter_after":0},
+        {"name":"GPU Energy","unit":"mJ","value":0,"counter_before":100,"counter_after":100},
+        {"name":"ANE Energy","unit":"mJ","value":0,"counter_before":100,"counter_after":99}],"gpu_states":[["OFF",100]]}}));
+    let a = lab.answer();
+    assert!(a["host"]["power"]["cpu_watts"].is_null());
+    assert!(a["host"]["power"]["ane_watts"].is_null());
+    assert_eq!(a["host"]["power"]["gpu_watts"], 0.0);
+    assert_eq!(a["host"]["power"]["gpu_active_share"], 0.0);
+    for key in ["power.cpu_watts", "power.ane_watts"] {
+        assert!(
+            a["skipped"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s["measurement"] == key)
+        );
+    }
+}
+
+#[test]
+fn optional_energy_cli_failures_leave_cpu_memory_network_and_power_answered() {
+    let rows = row(10, 501, "0:00.00", 1, "/App");
+    let lab = Lab::new(rows.clone(), rows);
+    lab.process(10, 10);
+    for i in 0..2 {
+        let path = lab.0.join(format!("now-host-{i}.json"));
+        let mut h: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        h["data"]["euid"] = json!(0);
+        fs::write(path, h.to_string()).unwrap();
+    }
+    for tool in ["top", "pmset", "powermetrics"] {
+        lab.write(
+            tool,
+            json!({"exit_code":77,"stderr":"fixture denied this source"}),
+        );
+    }
+    let a = lab.answer();
+    assert_eq!(a["processes"][0]["cpu_percent"], 0.0);
+    assert_eq!(a["processes"][0]["resident_bytes"], 1024);
+    assert_eq!(a["host"]["network"]["bytes_out_per_second"], 0.0);
+    assert_eq!(a["host"]["power"]["cpu_watts"], 0.0);
+    assert!(a["host"]["battery"].is_null());
+    assert!(a["host"]["thermal"].is_null());
+    assert!(a["processes"][0]["energy_impact"].is_null());
+    assert!(a["processes"][0]["gpu_time_ms"].is_null());
+    assert_eq!(a["rankings"]["processes_by_energy"], json!([]));
+    for key in ["battery", "thermal", "gpu_time_ms", "energy_impact"] {
+        let skipped = a["skipped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["measurement"] == key)
+            .unwrap();
+        assert!(
+            skipped["reason"]
+                .as_str()
+                .unwrap()
+                .contains("fixture denied")
+        );
+        assert!(skipped["fix"].as_str().unwrap().contains("PATH="));
+    }
+}
+
+#[test]
 fn sustained_cpu_and_resident_findings_cover_processes_outside_rankings() {
     let before = row(10, 501, "1000:00.00", 300, "/App")
         + &row(20, 501, "2000:00.00", 200, "/helper")
@@ -617,6 +793,28 @@ fn now_rejects_invalid_limits_and_explains_every_answer_key() {
     assert!(out.status.success());
     let help = String::from_utf8(out.stdout).unwrap();
     for key in [
+        "energy_impact",
+        "gpu_time_ms",
+        "gpu_time_window_seconds",
+        "processes_by_energy",
+        "apps_by_energy",
+        "battery",
+        "present",
+        "charge_percent",
+        "charging",
+        "state",
+        "power_source",
+        "time_remaining_minutes",
+        "thermal",
+        "cpu_speed_limit_percent",
+        "cpu_scheduler_limit_percent",
+        "available_cpus",
+        "cpu_throttled",
+        "power",
+        "cpu_watts",
+        "gpu_watts",
+        "ane_watts",
+        "gpu_active_share",
         "findings",
         "rule",
         "subject",
@@ -684,6 +882,7 @@ fn now_rejects_invalid_limits_and_explains_every_answer_key() {
     }
     use hostvitals_policy::findings;
     for rule in [
+        format!("CPU speed limit < {}%", findings::CPU_SPEED_LIMIT_PERCENT),
         format!(
             "pressure at {} or worse",
             findings::memory_pressure_threshold().name()
@@ -1071,6 +1270,33 @@ fn live_now_reads_host_and_every_user_without_root() {
     );
     let a: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(a["source"], "host");
+    assert!(a["host"]["battery"]["present"].is_boolean());
+    assert!(a["host"]["thermal"]["cpu_throttled"].is_boolean());
+    for key in ["cpu_watts", "gpu_watts", "ane_watts", "gpu_active_share"] {
+        let power = &a["host"]["power"];
+        if let Some(value) = power[key].as_f64() {
+            assert!(value.is_finite() && value >= 0.0);
+            if key == "gpu_active_share" {
+                assert!(value <= 1.0);
+            }
+        } else {
+            assert!(
+                a["skipped"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|s| s["measurement"] == "power"
+                        || s["measurement"] == format!("power.{key}"))
+            );
+        }
+    }
+    assert!(
+        a["processes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["uid"] == 0 && p["energy_impact"].as_f64().is_some_and(|s| s >= 0.0))
+    );
     assert!(a["host"]["network"]["window_seconds"].as_f64().unwrap() >= 1.0);
     let network_processes = a["processes"].as_array().unwrap();
     for direction in ["bytes_in_per_second", "bytes_out_per_second"] {

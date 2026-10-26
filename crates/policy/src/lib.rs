@@ -4,6 +4,7 @@ extern crate flux_core;
 
 use flux_rs::attrs::*;
 pub mod apps;
+pub mod energy;
 pub mod files;
 pub mod findings;
 pub mod network;
@@ -55,7 +56,10 @@ pub fn add_bytes(a: Option<u64>, b: Option<u64>) -> Option<u64> {
 }
 pub fn add_rates(a: Option<f64>, b: Option<f64>) -> Option<f64> {
     match (a, b) {
-        (Some(a), Some(b)) => Some(a + b),
+        (Some(a), Some(b)) => {
+            let total = a + b;
+            if total.is_finite() { Some(total) } else { None }
+        }
         _ => None,
     }
 }

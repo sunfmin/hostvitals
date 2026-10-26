@@ -26,9 +26,12 @@ unsafe extern "C" {
 }
 /// Checks task information for the observer without seeking a task port.
 pub fn read() -> Reading<Task> {
+    read_pid(std::process::id())
+}
+/// Reads the target's thread count without seeking a task port.
+pub fn read_pid(pid: u32) -> Reading<Task> {
     let mut task = TaskInfo::default();
     let size = std::mem::size_of::<TaskInfo>() as i32;
-    let pid = std::process::id();
     // SAFETY: PROC_PIDTASKINFO (4) takes the proc_taskinfo buffer and its exact byte size.
     let got = unsafe { proc_pidinfo(pid as i32, 4, 0, (&mut task as *mut TaskInfo).cast(), size) };
     if got != size || task.fields[9] <= 0 {

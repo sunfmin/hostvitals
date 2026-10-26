@@ -87,9 +87,9 @@ Rust, not a missing parser precondition.
 
 ## The checked remedy
 
-The fixture at
-[`crates/policy/tests/fixtures/call-graph.rs`](../../crates/policy/tests/fixtures/call-graph.rs)
-keeps the issue's entire source, with this one structural change:
+The product parser at
+[`crates/policy/src/profile.rs`](../../crates/policy/src/profile.rs)
+adopts the verified remedy from #98's original fixture, with this structural change:
 
 ```rust
 // At the end of summarize, after the graph-reading loop:
@@ -113,18 +113,19 @@ propagates the same errors before ranking. The graph-reading loop still stops
 at each footer, skips blank lines, and preserves the missing-footer flag.
 Each function now has its own checked control-flow graph.
 
-The policy root includes this same fixture under `cfg(flux)`, so the normal
-`./verify.sh` and gate verify its body and every helper alongside the existing
-policy. `allow(dead_code)` suppresses Rust's unused-fixture lint only; no Flux
-function is trusted or ignored. Stable integration tests import the same file
-and exercise all three footer exits, EOF, pending-frame counts, waiting samples,
-rankings, and an error raised while draining the stack. Inlining the drain into
-`summarize` again reproduces the checker crash and makes verification fail.
+The normal `./verify.sh` and gate verify the product parser's body and every
+helper alongside the existing policy. No function is trusted or ignored.
+`flux_call_graph` integration tests now call the actual public summarizer and
+retain all of #98's assertions for three footer exits, EOF, pending-frame
+counts, waiting samples, rankings, and an error raised while draining the stack.
+The duplicate parser fixture and its cfg-only inclusion were removed when #57
+adopted the remedy. Inlining the drain into `summarize` again reproduces the
+checker crash and makes verification fail.
 
 Run the focused runtime checks with
 `cargo test -p hostvitals-policy --test flux_call_graph <test-name> -- --exact`.
 Run the complete verification and regression suite through the normal gate,
 `afkconvoy exclusive -- ./gate.sh`; its policy summary must contain zero trusted
-and zero ignored functions. The fixture is not exported by the normal library
-and adds no profile command behavior. #57 remains responsible for adopting the
-helper in its product implementation and completing the entire feature.
+and zero ignored functions. For focused checking of the actual parser, run
+`./verify.sh profile`. #57 supplies the sampling command and report retention
+around this pure implementation.

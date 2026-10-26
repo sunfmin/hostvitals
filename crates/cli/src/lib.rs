@@ -10,6 +10,7 @@ mod help;
 mod memory;
 mod now;
 mod process;
+mod profile;
 pub mod tools;
 
 use clap::FromArgMatches;
@@ -39,6 +40,9 @@ pub fn main(args: impl IntoIterator<Item = OsString>) -> ExitCode {
         Err(e) => return refuse(format!("{e}; run hostvitals --help")),
     };
     match cli.command {
+        help::Command::Profile { pid, seconds, top } => {
+            println!("{}", profile::answer(pid, seconds, top));
+        }
         help::Command::Process { pid, seconds } => {
             let source =
                 direct::Source(std::env::var_os("HOSTVITALS_PROBE_FIXTURES").map(Into::into));

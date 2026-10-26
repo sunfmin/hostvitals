@@ -1,8 +1,5 @@
-// The supplied control#98 parser is a verification fixture, not a product interface.
-#[path = "fixtures/call-graph.rs"]
-mod call_graph;
-
-use call_graph::summarize;
+// Exercise the actual parser under the source remedy established by control#98.
+use hostvitals_policy::profile::summarize;
 
 const GRAPH: &str = "Call graph:
     10 Thread_1

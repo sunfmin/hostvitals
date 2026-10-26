@@ -82,6 +82,11 @@ fn sysctl<T: SysctlValue>(name: &CStr) -> Result<T, String> {
 pub fn read() -> Reading<Snapshot> {
     Reading::from_result(snapshot())
 }
+/// The actual effective user, including when native measurement fixtures are selected.
+pub(crate) fn effective_uid() -> u32 {
+    unsafe { geteuid() }
+}
+
 fn snapshot() -> Result<Snapshot, String> {
     let mut ticks = [0u32; 4];
     let mut count = 4;
@@ -108,7 +113,7 @@ fn snapshot() -> Result<Snapshot, String> {
     };
     let swap: Swap = sysctl(c"vm.swapusage")?;
     Ok(Snapshot {
-        euid: unsafe { geteuid() },
+        euid: effective_uid(),
         cpu_ticks: ticks,
         logical_cores: sysctl(c"hw.logicalcpu")?,
         physical_cores: sysctl(c"hw.physicalcpu")?,

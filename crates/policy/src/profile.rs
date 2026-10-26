@@ -1,6 +1,7 @@
-//! The control#98 reproducer, with only its final stack drain extracted into `finish_graph`.
-//! Kept outside the product interface and compiled by both Flux and the runtime regression tests.
+//! Interpret counted sample call graphs without reading a host or trusting its thresholded tables.
 use std::collections::BTreeMap;
+
+const IMAGE_MARKER: &str = "  (in ";
 
 #[derive(Debug)]
 pub struct HotPath {
@@ -55,7 +56,7 @@ pub fn summarize(text: &str, top: usize) -> Result<Summary, &'static str> {
     rank(paths, top, !complete)
 }
 
-// A separate function avoids the pinned checker's skipped-dominator-marker bug between loops.
+// Keep the drain in its own control-flow graph: see docs/verification/flux-loop-joins.md.
 fn finish_graph(
     stack: &mut Vec<Node>,
     paths: &mut BTreeMap<Vec<String>, u64>,
@@ -87,7 +88,15 @@ fn add_row(
         .ok_or("missing sample frame")?;
     let samples: u64 = count.parse().map_err(|_| "invalid sample count")?;
     let frame = frame.trim();
-    let thread = frame.starts_with("Thread_");
+    if frame.is_empty() {
+        return Err("missing sample frame");
+    }
+    let thread = !frame.contains(IMAGE_MARKER)
+        && frame
+            .split_whitespace()
+            .next()
+            .and_then(|name| name.strip_prefix("Thread_"))
+            .is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()));
     while stack
         .last()
         .is_some_and(|node| thread || node.depth >= depth)
@@ -233,7 +242,7 @@ fn finish_node(
 }
 
 fn frame_name(frame: &str) -> String {
-    if let Some((symbol, image)) = frame.split_once("  (in ")
+    if let Some((symbol, image)) = frame.split_once(IMAGE_MARKER)
         && let Some((image, _)) = image.split_once(')')
     {
         return format!("{} (in {image})", symbol.trim());

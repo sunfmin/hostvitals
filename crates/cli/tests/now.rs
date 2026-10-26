@@ -166,6 +166,30 @@ fn now_measures_the_window_and_ranks_root_memory_and_responsible_apps() {
     }
     let a = lab.answer();
     assert_eq!(a["source"], "fixtures");
+    let findings = a["findings"].as_array().expect("now judges its observations");
+    assert_eq!(findings.len(), 3, "{findings:?}");
+    assert_eq!(findings[0], json!({
+        "rule":"memory_pressure", "subject":{"kind":"host"},
+        "measured":{"pressure":"warn"},
+        "threshold":{"comparison":">=","pressure":"warn"},
+        "next_command":"hostvitals now --top 20"
+    }));
+    assert_eq!(findings[1]["rule"], "swap_used");
+    assert_eq!(findings[1]["subject"], json!({"kind":"host"}));
+    assert_eq!(findings[1]["measured"]["used_bytes"], 8568459428u64);
+    assert_eq!(findings[1]["measured"]["total_bytes"], 9663676416u64);
+    assert!((findings[1]["measured"]["percent"].as_f64().unwrap() - 88.66666327748).abs() < 1e-9);
+    assert_eq!(findings[1]["threshold"], json!({"comparison":">","percent":80}));
+    assert_eq!(findings[1]["next_command"], "hostvitals now --top 20");
+    assert_eq!(findings[2]["rule"], "process_resident");
+    assert_eq!(findings[2]["subject"], json!({
+        "kind":"process","pid":100,"started_at":"Mon Oct 12 17:34:33 2026","name":"fseventsd"
+    }));
+    assert_eq!(findings[2]["measured"]["resident_bytes"], 10630043648u64);
+    assert_eq!(findings[2]["measured"]["host_memory_bytes"], 51539607552u64);
+    assert!((findings[2]["measured"]["percent"].as_f64().unwrap() - 20.624999205271).abs() < 1e-9);
+    assert_eq!(findings[2]["threshold"], json!({"comparison":">","percent":10}));
+    assert_eq!(findings[2]["next_command"], "hostvitals memory 100");
     assert_eq!(a["processes"].as_array().unwrap().len(), 33);
     assert_eq!(a["host"]["cpu"]["user_percent"], 30.0);
     assert_eq!(a["host"]["cpu"]["system_percent"], 10.0);

@@ -34,6 +34,8 @@ awk '!/^\{/' "$flux_log" >&2
 
 cargo clippy --workspace --all-targets --quiet -- -D warnings
 
+packaging/release-test.sh
+
 # nextest holds each test to the limit .config/nextest.toml gives.
 cargo build --locked --quiet -p hostvitals --example probe-cli
 cargo nextest run --workspace --cargo-quiet --status-level fail --final-status-level fail --show-progress none

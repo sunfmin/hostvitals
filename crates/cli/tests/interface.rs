@@ -74,9 +74,11 @@ fn version_identifies_the_release_and_checkout() {
         .unwrap();
     assert!(out.status.success());
     let version = String::from_utf8(out.stdout).unwrap();
-    if version.trim() == "hostvitals 0.1.0" {
+    let release = format!("hostvitals {}", env!("CARGO_PKG_VERSION"));
+    let tag_name = format!("v{}", env!("CARGO_PKG_VERSION"));
+    if version.trim() == release {
         let tag = Command::new("git")
-            .args(["describe", "--exact-match", "--tags", "--match", "v0.1.0"])
+            .args(["describe", "--exact-match", "--tags", "--match", &tag_name])
             .current_dir(env!("CARGO_MANIFEST_DIR"))
             .output()
             .unwrap();
@@ -85,7 +87,7 @@ fn version_identifies_the_release_and_checkout() {
             "a release version requires its exact tag"
         );
     } else {
-        assert!(version.starts_with("hostvitals 0.1.0+"), "{version}");
+        assert!(version.starts_with(&format!("{release}+")), "{version}");
         assert!(version.contains(".g"), "{version}");
     }
 }

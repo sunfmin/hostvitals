@@ -2,7 +2,21 @@
 
 A read-only macOS agent CLI for host and process observations. Start with `hostvitals --help`, then `hostvitals doctor`; `hostvitals help all` opens the complete manual. Doctor inventories observation capabilities. `hostvitals now --seconds 3 --top 10` measures host CPU, memory and network, every user's processes, responsible App totals and eight rankings in one window. Other users' CPU, resident memory and network bytes are included without root; footprint reads that need elevation are explicitly skipped. `hostvitals memory <pid> [--top 15]` explains one Process's Footprint, region kinds, malloc zones and largest regions; `hostvitals memory --help` documents every output key and the size ranking.
 
-Build locally with `cargo build --locked -p hostvitals` on macOS arm64 or x86_64. Stable Rust builds the binary; the pinned nightly runs the verification gate. `./gate.sh` is the same gate locally and in CI: format, Flux alone (no trusted or ignored functions), clippy, then nextest. The checker versions and nightly live in `Cargo.toml`; `./verify.sh` rejects mismatches with installation instructions. Install nextest with `brew install cargo-nextest`.
+Install on macOS arm64 or x86_64:
+
+```sh
+brew install sunfmin/tap/hostvitals
+```
+
+For an AI agent, install the skill that points to the tool's help:
+
+```sh
+npx skills add sunfmin/hostvitals
+```
+
+Some measurements need root and are skipped without it. hostvitals never runs `sudo` itself; `hostvitals doctor` reports the observation capabilities here and the fixes for anything missing.
+
+Build locally with `cargo build --locked -p hostvitals` on macOS arm64 or x86_64. Stable Rust builds the binary; the pinned nightly runs the verification gate. `./gate.sh` is the same gate locally and in CI: format, Flux alone (no trusted or ignored functions), clippy, release packaging checks, then nextest. The checker versions and nightly live in `Cargo.toml`; `./verify.sh` rejects mismatches with installation instructions. Install nextest with `brew install cargo-nextest`.
 
 `hostvitals process <pid> [--seconds 3]` observes one Process: identity and responsible App, redacted argv, cwd, cumulative/window CPU and disk bytes, Resident, Footprint and lifetime peak, cumulative energy, threads, open files and sockets. Reverse names share one two-second deadline; failed lookups retain the remote IP. Another user's Process is ps-only without root. Root also reads filesystem activity over the window. Every optional denied/missing reading is null with a `skipped` reason and retry line. `hostvitals process --help` documents every key, observation limit and privilege rule.
 
@@ -19,3 +33,5 @@ Network reads use `nettop -L 1 -n -P -x -J bytes_in,bytes_out` twice, with no DN
 Process fixtures add `process-owner.json` (an available numeric effective UID), `process-rusage-0.json` and `process-rusage-1.json` (doctor's rusage fields), `process-task.json` (pid, resident_bytes, threads), and `process-app.json` (pid, app_pid). `process-arguments.bin` is a **synthetic** KERN_PROCARGS2 buffer: native-endian i32 argc, NUL-terminated executable path, zero padding, argc NUL-terminated arguments, then optional synthetic environment sentinels. Never record real argument buffers or environments as fixtures. The native reader bounds and sanitizes these fixtures through the same parser as live arguments; missing/malformed fixtures never fall back to live reads. Process tests cover binary output and errors, real argv and sockets, redaction properties, shared DNS timeout, process identity churn, root event parsing and non-root privilege skips. Native fixtures now apply to process as well as doctor and now; memory still reads only CLIs on PATH.
 
 [GLOSSARY.md](GLOSSARY.md) defines the domain language. [docs/adr](docs/adr) records the platform, source, read-only and scope decisions.
+
+The fleet cuts releases on an Apple Silicon Mac with Rosetta and stable Rust's `aarch64-apple-darwin` and `x86_64-apple-darwin` targets. The release sequence lives in [the fleet's cut configuration](docs/agents/afkconvoy.md); `packaging/release.sh` lists the individual operations. The formula is generated from the archives, with their URLs and SHA-256 hashes, and pushed to `sunfmin/homebrew-tap`.

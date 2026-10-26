@@ -62,7 +62,8 @@ impl Lab {
     }
     fn arguments(&self, arguments: &[&str]) {
         let mut bytes = (arguments.len() as i32).to_ne_bytes().to_vec();
-        bytes.extend_from_slice(b"/bin/program\0\0\0");
+        // XNU pads the executable path to an eight-byte boundary, excluding argc.
+        bytes.extend_from_slice(b"/bin/program\0\0\0\0");
         for arg in arguments {
             bytes.extend_from_slice(arg.as_bytes());
             bytes.push(0);

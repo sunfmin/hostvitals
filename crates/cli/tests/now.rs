@@ -89,6 +89,102 @@ fn row(pid: u32, uid: u32, cpu: &str, rss: u64, name: &str) -> String {
 }
 
 #[test]
+fn energy_impact_includes_every_user_and_ranks_complete_responsible_apps() {
+    let rows = row(10, 0, "0:00.00", 1, "/daemon")
+        + &row(20, 501, "0:00.00", 1, "/App")
+        + &row(21, 501, "0:00.00", 1, "/helper");
+    let lab = Lab::new(rows.clone(), rows);
+    for (pid, app) in [(10, 10), (20, 20), (21, 20)] {
+        lab.process(pid, app);
+    }
+    let standin = fs::read_link(lab.0.join("bin/ps")).unwrap();
+    std::os::unix::fs::symlink(standin, lab.0.join("bin/top")).unwrap();
+    lab.write("top", json!({"stdout":"Processes: 3 total\nPID POWER\n10 0.0\n20 0.0\n21 0.0\nProcesses: 3 total\nPID POWER\n10 12.5\n20 8.0\n21 7.0\n"}));
+    let a = lab.answer();
+    assert_eq!(a["processes"][0]["energy_impact"], 12.5);
+    assert_eq!(a["processes"][1]["energy_impact"], 8.0);
+    assert_eq!(a["processes"][2]["energy_impact"], 7.0);
+    assert_eq!(a["apps"][1]["energy_impact"], 15.0);
+    assert_eq!(a["rankings"]["processes_by_energy"][0]["pid"], 10);
+    assert_eq!(a["rankings"]["processes_by_energy"].as_array().unwrap().len(), 2);
+    assert_eq!(a["rankings"]["apps_by_energy"][0]["app_pid"], 20);
+    let state: Value = serde_json::from_slice(&fs::read(lab.0.join("top.json")).unwrap()).unwrap();
+    assert_eq!(state["calls"][0], json!(["-l","2","-s","1","-stats","pid,power"]));
+}
+
+#[test]
+fn battery_and_thermal_report_charge_source_time_and_cpu_limiting() {
+    for (battery, expected) in [
+        ("Now drawing from 'Battery Power'\n -InternalBattery-0 (id=1)\t64%; discharging; 3:45 remaining present: true\n", json!({"present":true,"charge_percent":64,"charging":false,"state":"discharging","power_source":"Battery Power","time_remaining_minutes":225})),
+        ("Now drawing from 'AC Power'\n -InternalBattery-0 (id=1)\t99%; charging; (no estimate) present: true\n", json!({"present":true,"charge_percent":99,"charging":true,"state":"charging","power_source":"AC Power","time_remaining_minutes":null})),
+        ("Now drawing from 'AC Power'\n", json!({"present":false,"charge_percent":null,"charging":null,"state":null,"power_source":"AC Power","time_remaining_minutes":null})),
+    ] {
+        let rows = row(10,501,"0:00.00",1,"/App");
+        let lab = Lab::new(rows.clone(),rows);
+        lab.process(10,10);
+        let standin = fs::read_link(lab.0.join("bin/ps")).unwrap();
+        std::os::unix::fs::symlink(standin, lab.0.join("bin/pmset")).unwrap();
+        lab.write("pmset", json!({"stdout_readings":[battery,"CPU_Speed_Limit = 75\nCPU_Scheduler_Limit = 90\nCPU_Available_CPUs = 6\n"]}));
+        let a=lab.answer();
+        assert_eq!(a["host"]["battery"],expected);
+        assert_eq!(a["host"]["thermal"],json!({"cpu_speed_limit_percent":75,"cpu_scheduler_limit_percent":90,"available_cpus":6,"cpu_throttled":true}));
+        let finding=a["findings"].as_array().unwrap().iter().find(|f| f["rule"]=="cpu_throttled").unwrap();
+        assert_eq!(finding["subject"],json!({"kind":"host"}));
+        assert_eq!(finding["measured"]["cpu_speed_limit_percent"],75);
+        assert_eq!(finding["threshold"],json!({"comparison":"<","cpu_speed_limit_percent":100}));
+        assert_eq!(finding["next_command"],"hostvitals now --top 20");
+    }
+}
+
+#[test]
+fn component_power_uses_ioreport_units_elapsed_window_and_gpu_residency_without_root() {
+    let rows = row(10,501,"0:00.00",1,"/App");
+    let lab=Lab::new(rows.clone(),rows);
+    lab.process(10,10);
+    lab.write("now-power",json!({"status":"available","data":{"window_seconds":1.5,"energy":[
+        {"name":"DIE_0_CPU Energy","unit":"mJ","value":2000},
+        {"name":"DIE_1_CPU Energy","unit":"mJ","value":1000},
+        {"name":"GPU Energy","unit":"uJ","value":600000},
+        {"name":"ANE0 Energy","unit":"nJ","value":300000000}],
+        "gpu_states":[["OFF",750],["IDLE",0],["P1",100],["P2",150]]}}));
+    let a=lab.answer();
+    assert_eq!(a["host"]["power"],json!({"window_seconds":1.5,"cpu_watts":2.0,"gpu_watts":0.4,"ane_watts":0.2,"gpu_active_share":0.25}));
+}
+
+#[test]
+fn gpu_time_is_skipped_without_root_and_read_over_the_window_with_root() {
+    for euid in [501,0] {
+        let rows=row(10,501,"0:00.00",1,"/App")+&row(20,0,"0:00.00",1,"/daemon");
+        let lab=Lab::new(rows.clone(),rows);
+        lab.process(10,10);
+        lab.process(20,20);
+        for i in 0..2 {
+            let path=lab.0.join(format!("now-host-{i}.json"));
+            let mut h:Value=serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            h["data"]["euid"]=json!(euid);
+            fs::write(path,h.to_string()).unwrap();
+        }
+        let standin=fs::read_link(lab.0.join("bin/ps")).unwrap();
+        std::os::unix::fs::symlink(standin,lab.0.join("bin/powermetrics")).unwrap();
+        lab.write("powermetrics",json!({"stdout":"*** Sampled system activity (Mon Oct 26 2026) (1250.00ms elapsed) ***\n\nName ID CPU ms/s User% GPU ms/s\nApp with spaces 10 5.0 20.0 40.0\ndaemon 20 0.0 0.0 0.0\n\n"}));
+        let a=lab.answer();
+        let state:Value=serde_json::from_slice(&fs::read(lab.0.join("powermetrics.json")).unwrap()).unwrap();
+        if euid==0 {
+            assert_eq!(a["processes"][0]["gpu_time_ms"],50.0);
+            assert_eq!(a["processes"][1]["gpu_time_ms"],0.0);
+            assert_eq!(a["host"]["gpu_time_window_seconds"],1.25);
+            assert_eq!(state["calls"],json!([["-n","1","-i","1000","--samplers","tasks","--show-process-gpu"]]));
+        } else {
+            assert_eq!(state["calls"],json!([]));
+            assert!(a["processes"][0]["gpu_time_ms"].is_null());
+            let skipped=a["skipped"].as_array().unwrap().iter().find(|s| s["measurement"]=="gpu_time_ms").unwrap();
+            assert!(skipped["reason"].as_str().unwrap().contains("root"));
+            assert_eq!(skipped["fix"],"sudo hostvitals now --seconds 1 --top 2");
+        }
+    }
+}
+
+#[test]
 fn healthy_findings_are_first_and_app_sums_do_not_create_process_findings() {
     let before = row(10, 501, "1000:00.00", 1, "/App") + &row(11, 501, "1000:00.00", 1, "/helper");
     let after = row(10, 501, "1000:00.60", 1, "/App") + &row(11, 501, "1000:00.60", 1, "/helper");

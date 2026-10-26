@@ -100,3 +100,9 @@ mod rejected {
 }
 
 pub mod memory;
+
+// Check the control#98 reproducer as policy code, using the same source as its runtime tests.
+#[cfg(flux)]
+#[allow(dead_code)]
+#[path = "../tests/fixtures/call-graph.rs"]
+mod call_graph_regression;

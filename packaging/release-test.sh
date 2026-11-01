@@ -2,6 +2,8 @@
 # Exercises release.sh at its command-line interface, with real Mach-O
 # binaries and a local tap. GitHub is the only publishing stand-in.
 set -euo pipefail
+# Fixtures own their build and distribution directories, regardless of the caller.
+unset CARGO_TARGET_DIR DIST
 cd "$(dirname "$0")/.."
 root=$PWD
 scratch=$(mktemp -d)
@@ -42,6 +44,8 @@ binaries() {
 
 case "${1:-all}" in
 all)
+    # Exercise every fixture with the overrides inherited in convoy candidate gates.
+    export CARGO_TARGET_DIR="$scratch/inherited-target" DIST="$scratch/inherited-dist"
     for test in set check build package formula publish; do
         "$root/packaging/release-test.sh" "$test"
     done

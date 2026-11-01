@@ -569,3 +569,22 @@ fn live_empty_argv_zero_never_causes_environment_to_be_parsed_as_an_argument() {
     assert_eq!(a["command_line"][1], "-c");
     assert_eq!(a["command_line"][2], "while :; do :; done");
 }
+
+#[test]
+fn process_survives_unusable_names_in_the_snapshot() {
+    for (target_name, other_name, expected) in [
+        ("wmexternal", "", "wmexternal"),
+        ("", "wmexternal", "unknown"),
+        ("/", "wmexternal", "unknown"),
+        ("App with spaces", "wmexternal", "App with spaces"),
+    ] {
+        let lab = Lab::new();
+        let snapshot = format!(
+            "123 12 501 me 0:01.00 4 Mon Oct 12 00:00:00 2026 {target_name}\n124 12 501 me 0:01.00 4 Mon Oct 12 00:00:00 2026 {other_name}\n"
+        );
+        lab.write("ps", json!({"stdout_readings":[snapshot, snapshot]}));
+        let (out, answer) = lab.run();
+        assert!(out.status.success(), "{answer}");
+        assert_eq!(answer["name"], expected);
+    }
+}

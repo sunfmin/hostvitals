@@ -47,7 +47,10 @@ fn parse(text: &str) -> Result<BTreeMap<u32, SnapshotProcess>, String> {
             let mut rest = line.trim();
             let mut fields = Vec::new();
             for _ in 0..11 {
-                let end = rest.find(char::is_whitespace).ok_or("missing ps field")?;
+                let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+                if end == 0 {
+                    return Err("missing ps field");
+                }
                 fields.push(&rest[..end]);
                 rest = rest[end..].trim_start();
             }
@@ -67,7 +70,7 @@ fn parse(text: &str) -> Result<BTreeMap<u32, SnapshotProcess>, String> {
                     .rsplit('/')
                     .next()
                     .filter(|s| !s.is_empty())
-                    .ok_or("missing name")?
+                    .unwrap_or("unknown")
                     .into(),
             };
             if p.pid == 0 || processes.insert(p.pid, p).is_some() {

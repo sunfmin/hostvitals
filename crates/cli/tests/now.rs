@@ -134,6 +134,19 @@ fn registry(entries: &[(u64, Option<u64>, Option<u64>)]) -> String {
 }
 
 #[test]
+fn inventory_requests_kernel_process_names_instead_of_mutable_titles() {
+    let rows = row(1572, 501, "0:04.55", 68, "wmexternal");
+    let lab = Lab::new(rows.clone(), rows);
+    lab.process(1572, 1572);
+    let answer = lab.answer();
+    assert_eq!(answer["processes"][0]["name"], "wmexternal");
+    let state: Value = serde_json::from_slice(&fs::read(lab.0.join("ps.json")).unwrap()).unwrap();
+    for call in state["calls"].as_array().unwrap() {
+        assert_eq!(call[2], "pid=,ppid=,uid=,user=,time=,rss=,lstart=,ucomm=");
+    }
+}
+
+#[test]
 fn disk_reports_directional_host_rates_using_its_actual_interval() {
     let rows = row(1, 501, "0:00.00", 1, "/one");
     let lab = Lab::new(rows.clone(), rows);

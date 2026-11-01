@@ -4,7 +4,7 @@ The source selection follows the measurements recorded in control#50 on macOS 27
 
 | Observation | Source and reason |
 | --- | --- |
-| Process list, every Process's CPU and memory | `ps`; it is setuid root. Names use `ucomm` (macOS accounting names, potentially truncated), not `comm` rewritten by a Process; an empty or slash-only name becomes `unknown`. A third-party binary's task information and rusage fail for root processes such as fseventsd, WindowServer and launchd, even though their names and pids are visible. `top` holds `com.apple.system-task-ports.read`. |
+| Process list, every Process's CPU and memory | `ps`; it is setuid root. Names use `ucomm` (macOS accounting names, potentially truncated), not `comm`, which can contain a mutable title and arguments; an empty or slash-only name becomes `unknown`. A third-party binary's task information and rusage fail for root processes such as fseventsd, WindowServer and launchd, even though their names and pids are visible. `top` holds `com.apple.system-task-ports.read`. |
 | Own Processes' cumulative CPU, resident, footprint, lifetime peak footprint, disk bytes and energy | `proc_pid_rusage` v6 adds counters to the `ps` observations; it is not the inventory's source. |
 | Host directional disk activity | Structured `ioreg -a -r -c IOBlockStorageDriver -d 1` plists supply cumulative read/write bytes for each unique registry entry. `iostat` exposes combined throughput only; its doctor check remains a combined-I/O capability. |
 | Mounted local volumes' capacity and available bytes | `df -a -l -k -P`, retaining filesystem and mount path identities and converting reported blocks with checked arithmetic. APFS capacity may be shared; no host free-space total is derived. |

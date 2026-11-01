@@ -14,6 +14,7 @@ pub(crate) fn snapshot() -> Result<BTreeMap<u32, SnapshotProcess>, String> {
             .args([
                 "-Aww",
                 "-o",
+                // comm can be a mutable process title, including arguments or a trailing slash.
                 "pid=,ppid=,uid=,user=,time=,rss=,lstart=,ucomm=",
             ])
             .env("LC_ALL", "C")

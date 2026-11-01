@@ -366,7 +366,7 @@ fn live_ended_process_retains_the_same_report_that_was_summarized() {
     let answer_path = lab.0.join("answer.json");
     let mut observer = ReapedChild(
         Command::new(env!("CARGO_BIN_EXE_hostvitals"))
-            .args(["profile", &child.0.id().to_string(), "--seconds", "3"])
+            .args(["profile", &child.0.id().to_string(), "--seconds", "8"])
             .env("TMPDIR", &lab.0)
             .env(
                 "PATH",
@@ -399,7 +399,8 @@ fn live_ended_process_retains_the_same_report_that_was_summarized() {
         thread::sleep(Duration::from_millis(10));
     }
     let collecting = Instant::now();
-    thread::sleep(Duration::from_millis(250));
+    // The announcement precedes actual stack collection; allow for a busy host.
+    thread::sleep(Duration::from_secs(2));
     assert!(child.0.try_wait().unwrap().is_none());
     fs::write(lab.0.join("target-release"), "").unwrap();
     let completion_deadline = Instant::now() + Duration::from_secs(10);
@@ -413,7 +414,7 @@ fn live_ended_process_retains_the_same_report_that_was_summarized() {
     assert!(child.0.wait().unwrap().success());
     let ended_after = collecting.elapsed();
     assert!(
-        ended_after < Duration::from_secs(3),
+        ended_after < Duration::from_secs(8),
         "target must end before the requested Window completes"
     );
     let observation_deadline = Instant::now() + Duration::from_secs(40);

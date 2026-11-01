@@ -29,9 +29,10 @@ through a flushed pseudo-terminal. Redirecting progress directly to a file
 buffered the announcement until the observation was over, which is unsuitable
 for coordination.
 
-After the announcement, the test gives sample 250 ms of the target's sleeping
-state, releases it, and checks that it exits before the requested three-second
-Window completes. Readiness, collection and completion each have deadlines;
+After the announcement, the test gives sample two seconds of the target's sleeping
+state, releases it, and checks that it exits before the requested eight-second
+Window completes. The longer allowance accounts for collection beginning after
+the announcement on a busy host. Readiness, collection and completion each have deadlines;
 owned children are killed and reaped on assertion failures. The observation
 itself also has the production timeout. There is one invocation, with no retry
 until success. A captured repaired run collected 165 samples, 164 waiting, and

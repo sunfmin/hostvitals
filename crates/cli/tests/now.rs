@@ -1893,3 +1893,39 @@ fn live_now_reads_host_and_every_user_without_root() {
         3
     );
 }
+
+#[test]
+fn snapshot_keeps_processes_with_unusable_accounting_names() {
+    let rows = [
+        row(11, 501, "0:00.00", 1, "wmexternal"),
+        row(12, 501, "0:00.00", 1, ""),
+        row(13, 501, "0:00.00", 1, "/"),
+        row(14, 501, "0:00.00", 1, "App with spaces"),
+    ]
+    .concat();
+    let lab = Lab::new(rows.clone(), rows);
+    for pid in 11..=14 {
+        lab.process(pid, pid);
+    }
+    let answer = lab.answer();
+    let processes = answer["processes"].as_array().unwrap();
+    for (pid, name) in [
+        (11, "wmexternal"),
+        (12, "unknown"),
+        (13, "unknown"),
+        (14, "App with spaces"),
+    ] {
+        assert_eq!(
+            processes.iter().find(|p| p["pid"] == pid).unwrap()["name"],
+            name
+        );
+    }
+    let state: Value = serde_json::from_slice(&fs::read(lab.0.join("ps.json")).unwrap()).unwrap();
+    assert!(
+        state["calls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|call| call[2] == "pid=,ppid=,uid=,user=,time=,rss=,lstart=,ucomm=")
+    );
+}

@@ -447,10 +447,10 @@ fn live_ended_process_retains_the_same_report_that_was_summarized() {
                 .collect::<Vec<_>>()
         )
     );
-    assert_eq!(
-        answer["hot_paths"],
-        json!(summary.hot_paths.iter().map(|path| json!({"frames":path.frames,"sample_count":path.sample_count,"share":path.share})).collect::<Vec<_>>())
-    );
+    // Compare after the same JSON round trip as the CLI output, including float parsing.
+    let expected_paths = json!(summary.hot_paths.iter().map(|path| json!({"frames":path.frames,"sample_count":path.sample_count,"share":path.share})).collect::<Vec<_>>());
+    let expected_paths: Value = serde_json::from_str(&expected_paths.to_string()).unwrap();
+    assert_eq!(answer["hot_paths"], expected_paths);
     assert_eq!(
         fs::metadata(path).unwrap().permissions().mode() & 0o777,
         0o600

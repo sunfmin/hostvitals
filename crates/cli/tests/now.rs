@@ -556,6 +556,36 @@ fn every_local_volume_has_capacity_and_only_strictly_low_free_space_suggests_dis
 }
 
 #[test]
+fn volumes_read_a_captured_df_report_whose_filesystem_names_have_spaces() {
+    let rows = row(1, 501, "0:00.00", 1, "/one");
+    let lab = Lab::new(rows.clone(), rows);
+    lab.process(1, 1);
+    let report = include_str!("fixtures/df-coredevice.txt").to_owned()
+        + "//someone@nas/Shared Media  2000  1000  1000    50%    /Volumes/Shared Media\n";
+    lab.write("df", json!({"stdout": report}));
+    let a = lab.answer();
+    let volumes = a["volumes"]
+        .as_array()
+        .expect("mounted local volume inventory");
+    assert_eq!(volumes.len(), 16);
+    assert!(volumes.iter().any(|v| v["mount_point"] == "/"));
+    assert!(volumes.contains(&json!({
+        "filesystem": "devices -- file:///Users/someone/Library/Containers/com.apple.CoreDevice.CoreDeviceService/Data/",
+        "mount_point": "/Users/someone/Library/Developer/CoreDevice/DeviceFS",
+        "size_bytes": 1099511627776u64,
+        "free_bytes": 1099511627776u64,
+        "free_share": 1.0
+    })));
+    assert!(volumes.contains(&json!({
+        "filesystem": "//someone@nas/Shared Media",
+        "mount_point": "/Volumes/Shared Media",
+        "size_bytes": 2048000,
+        "free_bytes": 1024000,
+        "free_share": 0.5
+    })));
+}
+
+#[test]
 fn disk_help_describes_measurements_completeness_ranking_and_the_authoritative_threshold() {
     let out = Command::new(env!("CARGO_BIN_EXE_hostvitals"))
         .args(["now", "--help"])

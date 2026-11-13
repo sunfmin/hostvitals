@@ -469,10 +469,22 @@ pub fn answer(source: &Source, seconds: NonZeroU64, top: NonZeroUsize) -> Result
         }
     }).collect();
         let volumes = match df::snapshot() {
-            Ok(volumes) => {
+            Ok(df::Inventory {
+                volumes,
+                skipped_rows,
+            }) => {
+                const FIX: &str = "df -a -l -k -P && hostvitals now";
+                for row in skipped_rows {
+                    let mut entry =
+                        json!({"measurement":"volumes","count":1,"reason":row.reason,"fix":FIX});
+                    if let Some(mount_point) = row.mount_point {
+                        entry["mount_point"] = mount_point.into();
+                    }
+                    skipped.push(entry);
+                }
                 let unavailable = volumes.iter().filter(|v| v.free_share.is_none()).count();
                 if unavailable > 0 {
-                    skipped.push(json!({"measurement":"volumes","count":unavailable,"reason":"volume capacity or available bytes unknown, invalid, overflowed or zero capacity; no free-space ratio can be judged","fix":"df -a -l -k -P && hostvitals now"}));
+                    skipped.push(json!({"measurement":"volumes","count":unavailable,"reason":"volume capacity or available bytes unknown, invalid, overflowed or zero capacity; no free-space ratio can be judged","fix":FIX}));
                 }
                 for v in &volumes {
                     if policy::disk::low_free(v.size_bytes, v.free_bytes) {

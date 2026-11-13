@@ -2,7 +2,7 @@ use hostvitals_policy::findings::{Finding, Host, Pressure, judge};
 
 fn host(pressure: Pressure) -> Host {
     Host {
-        pressure,
+        pressure: Some(pressure),
         memory_bytes: 1_000,
         swap_used_bytes: 0,
         swap_total_bytes: 1_000,
@@ -86,7 +86,7 @@ fn cpu_requires_at_least_one_core_across_the_actual_window() {
 fn zero_denominators_and_extreme_counters_never_overflow_or_invent_ratios() {
     use hostvitals_policy::findings::Process;
     let mut h = Host {
-        pressure: Pressure::Normal,
+        pressure: Some(Pressure::Normal),
         memory_bytes: 0,
         swap_used_bytes: u64::MAX,
         swap_total_bytes: 0,
@@ -125,4 +125,22 @@ fn zero_denominators_and_extreme_counters_never_overflow_or_invent_ratios() {
             window_nanoseconds: 1
         }]
     ));
+}
+
+#[test]
+fn kernel_pressure_levels_map_only_darwins_three_values() {
+    // sys/kern_memorystatus.h: kVMPressureNormal 1, kVMPressureWarning 2, kVMPressureCritical 4.
+    assert_eq!(Pressure::from_kernel_level(1), Some(Pressure::Normal));
+    assert_eq!(Pressure::from_kernel_level(2), Some(Pressure::Warn));
+    assert_eq!(Pressure::from_kernel_level(4), Some(Pressure::Critical));
+    for unknown in [i32::MIN, -1, 0, 3, 5, 8, i32::MAX] {
+        assert_eq!(Pressure::from_kernel_level(unknown), None, "{unknown}");
+    }
+}
+
+#[test]
+fn unknown_pressure_is_never_judged_as_a_finding() {
+    let mut h = host(Pressure::Critical);
+    h.pressure = None;
+    assert!(judge(&h, &[], 1_000_000_000).is_empty());
 }

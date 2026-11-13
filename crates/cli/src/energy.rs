@@ -1,6 +1,6 @@
 //! Converts independent energy observations to the public answer without hiding other sources.
 use crate::direct::{Reading, ioreport};
-use crate::tools::pmset;
+use crate::tools::{notifyutil, pmset};
 use hostvitals_policy::findings;
 use serde_json::{Value, json};
 
@@ -88,7 +88,16 @@ pub(crate) fn battery(skipped: &mut Vec<Value>) -> Value {
         }
     }
 }
+/// Thermal pressure and pmset's CPU limits are independent sources; either can be missing alone.
 pub(crate) fn thermal(skipped: &mut Vec<Value>, judgements: &mut Vec<Value>) -> Value {
+    let pressure = match notifyutil::thermal_pressure() {
+        Ok(pressure) => Some(pressure.name()),
+        Err(reason) => {
+            skip(skipped, "thermal.pressure", reason);
+            None
+        }
+    };
+    let mut answer = json!({"pressure":pressure,"cpu_speed_limit_percent":null,"cpu_scheduler_limit_percent":null,"available_cpus":null,"cpu_throttled":null});
     match pmset::thermal() {
         Ok(t) => {
             let throttled = t
@@ -100,13 +109,14 @@ pub(crate) fn thermal(skipped: &mut Vec<Value>, judgements: &mut Vec<Value>) -> 
                     "threshold":{"comparison":"<","cpu_speed_limit_percent":findings::CPU_SPEED_LIMIT_PERCENT},
                     "next_command":"hostvitals now --top 20"}));
             }
-            json!({"cpu_speed_limit_percent":t.cpu_speed_limit_percent,"cpu_scheduler_limit_percent":t.cpu_scheduler_limit_percent,"available_cpus":t.available_cpus,"cpu_throttled":throttled})
+            answer["cpu_speed_limit_percent"] = json!(t.cpu_speed_limit_percent);
+            answer["cpu_scheduler_limit_percent"] = json!(t.cpu_scheduler_limit_percent);
+            answer["available_cpus"] = json!(t.available_cpus);
+            answer["cpu_throttled"] = json!(throttled);
         }
-        Err(reason) => {
-            skip(skipped, "thermal", reason);
-            Value::Null
-        }
+        Err(reason) => skip(skipped, "thermal.cpu_limits", reason),
     }
+    answer
 }
 fn skip(skipped: &mut Vec<Value>, measurement: &str, reason: String) {
     skipped.push(json!({"measurement":measurement,"count":1,"reason":reason,"fix":"PATH=/usr/bin:/bin:/usr/sbin:/sbin:$PATH hostvitals doctor && hostvitals now"}));

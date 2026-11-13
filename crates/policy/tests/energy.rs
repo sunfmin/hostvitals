@@ -95,3 +95,45 @@ fn battery_not_charging_and_low_battery_warnings_preserve_the_status() {
     let b=energy::parse_battery("Now drawing from 'AC Power'\n -InternalBattery-0 (id=1) 99%; finishing charge; (no estimate) present: true\n").unwrap();
     assert_eq!(b.charging, Some(true));
 }
+
+#[test]
+fn recorded_thermal_reports_parse_without_root() {
+    let pressure =
+        energy::parse_thermal_pressure(include_str!("fixtures/notifyutil-thermal-pressure.txt"))
+            .unwrap();
+    assert_eq!(pressure, energy::ThermalPressure::Nominal);
+    assert_eq!(pressure.name(), "nominal");
+    let limits = energy::parse_thermal(include_str!("fixtures/pmset-therm.txt")).unwrap();
+    assert_eq!(limits.cpu_speed_limit_percent, None);
+}
+
+#[test]
+fn thermal_pressure_names_every_darwin_level_and_rejects_anything_else() {
+    // libkern/OSThermalNotification.h: nominal 0, moderate 1, heavy 2, trapping 3, sleeping 4.
+    for (level, name) in [
+        (0, "nominal"),
+        (1, "moderate"),
+        (2, "heavy"),
+        (3, "trapping"),
+        (4, "sleeping"),
+    ] {
+        let text = format!("com.apple.system.thermalpressurelevel {level}\n");
+        assert_eq!(energy::parse_thermal_pressure(&text).unwrap().name(), name);
+    }
+    for report in [
+        "",
+        "\n",
+        "com.apple.system.thermalpressurelevel\n",
+        "com.apple.system.thermalpressurelevel 5\n",
+        "com.apple.system.thermalpressurelevel -1\n",
+        "com.apple.system.thermalpressurelevel 1 2\n",
+        "com.apple.system.thermalpressurelevel x\n",
+        "com.apple.system.otherkey 0\n",
+        "com.apple.system.thermalpressurelevel 0\ncom.apple.system.thermalpressurelevel 0\n",
+    ] {
+        assert!(
+            energy::parse_thermal_pressure(report).is_err(),
+            "{report:?}"
+        );
+    }
+}

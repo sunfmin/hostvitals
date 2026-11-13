@@ -23,7 +23,13 @@ fn main() {
         return;
     };
     let dir = env::var_os("HOSTVITALS_PROBE_FIXTURES").expect("fixture directory");
-    let path = Path::new(&dir).join(format!("{}.json", tool.name()));
+    // A call naming an argument with its own state file (such as `ioreg-IOAccelerator.json`)
+    // uses it, so one tool's distinct queries keep separate readings.
+    let path = args[1..]
+        .iter()
+        .map(|arg| Path::new(&dir).join(format!("{}-{arg}.json", tool.name())))
+        .find(|path| path.exists())
+        .unwrap_or_else(|| Path::new(&dir).join(format!("{}.json", tool.name())));
     let mut state: StandIn = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     state.calls.push(args[1..].to_vec());
     let stdout = state

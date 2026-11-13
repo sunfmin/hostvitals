@@ -40,6 +40,12 @@ _Avoid_: Energy impact, energy (energy accumulates over time).
 **CPU throttling**: A limit macOS places on the CPU's speed below its full-speed allowance.
 _Avoid_: High CPU usage (workload does not establish a speed limit).
 
+**Thermal pressure**: macOS's judgement of how hard it must limit the machine to stay within thermal limits: nominal, moderate, heavy, trapping or sleeping.
+_Avoid_: Temperature (a pressure level is not a measured temperature), CPU throttling (a speed limit is one consequence).
+
+**GPU utilization**: The share of a GPU's capacity its driver reports in use at one moment.
+_Avoid_: GPU active share (residency over a Window), GPU time by Process.
+
 **GPU active share**: The fraction of a Window's recorded GPU state residency spent in active states.
 _Avoid_: GPU time by Process (that attributes GPU work to one Process).
 

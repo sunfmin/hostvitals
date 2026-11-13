@@ -26,6 +26,16 @@ pub enum Pressure {
     Critical,
 }
 impl Pressure {
+    /// Darwin's `kern.memorystatus_vm_pressure_level`: 1 normal, 2 warning, 4 critical; anything else is unknown.
+    pub fn from_kernel_level(level: i32) -> Option<Self> {
+        match level {
+            1 => Some(Self::Normal),
+            2 => Some(Self::Warn),
+            4 => Some(Self::Critical),
+            _ => None,
+        }
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Self::Normal => "normal",
@@ -45,7 +55,8 @@ impl Pressure {
 }
 
 pub struct Host {
-    pub pressure: Pressure,
+    /// None when macOS's judgement was not read; it never yields a pressure finding.
+    pub pressure: Option<Pressure>,
     pub memory_bytes: u64,
     pub swap_used_bytes: u64,
     pub swap_total_bytes: u64,
@@ -82,10 +93,10 @@ pub enum Finding {
 /// A zero denominator never yields a ratio finding.
 pub fn judge(host: &Host, processes: &[Process], window_nanoseconds: u128) -> Vec<Finding> {
     let mut findings = Vec::new();
-    if memory_pressure(host.pressure) {
-        findings.push(Finding::MemoryPressure {
-            pressure: host.pressure,
-        });
+    if let Some(pressure) = host.pressure
+        && memory_pressure(pressure)
+    {
+        findings.push(Finding::MemoryPressure { pressure });
     }
     if past_percent(
         host.swap_used_bytes,

@@ -407,14 +407,16 @@ pub fn answer(source: &Source, seconds: NonZeroU64, top: NonZeroUsize) -> Result
             }
         }
         skipped.extend(energy_skipped);
-        let pressure = match host_after.memory.pressure.as_str() {
-            "normal" => policy::findings::Pressure::Normal,
-            "warn" => policy::findings::Pressure::Warn,
-            "critical" => policy::findings::Pressure::Critical,
-            unknown => {
-                return Err(format!(
-                    "unknown memory pressure {unknown}; run hostvitals doctor && hostvitals now"
-                ));
+        let pressure = match &host_after.memory.pressure_level {
+            Reading::Available { data } => policy::findings::Pressure::from_kernel_level(*data)
+                .ok_or_else(|| format!("unknown kern.memorystatus_vm_pressure_level {data}")),
+            Reading::Unavailable { reason } => Err(reason.clone()),
+        };
+        let pressure = match pressure {
+            Ok(pressure) => Some(pressure),
+            Err(reason) => {
+                skipped.push(json!({"measurement":"host.memory.pressure","count":1,"reason":reason,"fix":"hostvitals doctor && hostvitals now"}));
+                None
             }
         };
         let observations: Vec<_> = processes
@@ -488,6 +490,7 @@ pub fn answer(source: &Source, seconds: NonZeroU64, top: NonZeroUsize) -> Result
         };
         let battery = crate::energy::battery(&mut skipped);
         let thermal = crate::energy::thermal(&mut skipped, &mut findings);
+        let accelerators = gpu_utilization(&mut skipped);
         let usages: Vec<_> = processes
             .iter()
             .map(|p| policy::apps::ProcessUsage {
@@ -622,6 +625,7 @@ pub fn answer(source: &Source, seconds: NonZeroU64, top: NonZeroUsize) -> Result
                 "host": {
                     "battery": battery,
                     "thermal": thermal,
+                    "gpu": accelerators,
                     "power": power,
                     "gpu_time_window_seconds": gpu.as_ref().map(|g| g.window_seconds),
                     "cpu": {
@@ -637,7 +641,14 @@ pub fn answer(source: &Source, seconds: NonZeroU64, top: NonZeroUsize) -> Result
                         "read_bytes_per_second": policy::network::per_second(host_disk.read_bytes, disk_seconds),
                         "written_bytes_per_second": policy::network::per_second(host_disk.written_bytes, disk_seconds)
                     },
-                    "memory": host_after.memory,
+                    "memory": {
+                        "total_bytes": host_after.memory.total_bytes,
+                        "free_percent": host_after.memory.free_percent,
+                        "pressure": pressure.map(policy::findings::Pressure::name),
+                        "swap_used_bytes": host_after.memory.swap_used_bytes,
+                        "swap_total_bytes": host_after.memory.swap_total_bytes,
+                        "compressed_bytes": host_after.memory.compressed_bytes
+                    },
                     "network": {
                         "window_seconds": if network_before.is_ok() && network_after.is_ok() { Some(network_seconds) } else { None },
                         "bytes_in_per_second": policy::network::per_second(host_network.bytes_in, network_seconds),
@@ -665,6 +676,26 @@ pub fn answer(source: &Source, seconds: NonZeroU64, top: NonZeroUsize) -> Result
             }),
         })
     })
+}
+
+/// Each accelerator's instantaneous utilization; an unreadable one is null, never zero.
+fn gpu_utilization(skipped: &mut Vec<Value>) -> Option<Vec<ioreg::Accelerator>> {
+    match ioreg::accelerators() {
+        Ok(devices) => {
+            let missing = devices
+                .iter()
+                .filter(|d| d.utilization_percent.is_none())
+                .count();
+            if missing > 0 {
+                skipped.push(json!({"measurement":"gpu.utilization_percent","count":missing,"reason":"accelerator reports no valid PerformanceStatistics \"Device Utilization %\" between 0 and 100","fix":"PATH=/usr/bin:/bin:/usr/sbin:/sbin:$PATH ioreg -r -c IOAccelerator -d 1"}));
+            }
+            Some(devices)
+        }
+        Err(reason) => {
+            skipped.push(json!({"measurement":"gpu","count":1,"reason":reason,"fix":"PATH=/usr/bin:/bin:/usr/sbin:/sbin:$PATH hostvitals doctor && hostvitals now"}));
+            None
+        }
+    }
 }
 
 fn usages(

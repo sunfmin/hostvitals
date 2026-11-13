@@ -57,7 +57,7 @@ fn parse(text: &str) -> Result<Inventory, &'static str> {
     };
     let mut identities = BTreeSet::new();
     for line in lines {
-        let Some(row) = Row::read(line) else {
+        let Some(row) = row(line) else {
             inventory.skipped_rows.push(SkippedRow {
                 reason: "unreadable df volume row: no 1024-blocks, Used, Available and Capacity columns followed by an absolute mount point",
                 mount_point: None,
@@ -71,7 +71,7 @@ fn parse(text: &str) -> Result<Inventory, &'static str> {
             });
             continue;
         }
-        let size_bytes = bytes(row.blocks);
+        let size_bytes = bytes(row.size);
         let mut free_bytes = bytes(row.available);
         if size_bytes
             .zip(free_bytes)
@@ -97,49 +97,51 @@ fn parse(text: &str) -> Result<Inventory, &'static str> {
     Ok(inventory)
 }
 
-/// One df row's columns. Filesystem names and mount points may both hold
-/// spaces, so the row is anchored on its numeric columns: the first word that
-/// reads as a Capacity (`NN%` or `-`), preceded by three block columns and at
-/// least one filesystem word, and followed by an absolute mount point.
 struct Row<'a> {
     filesystem: &'a str,
-    blocks: &'a str,
+    size: &'a str,
     available: &'a str,
     mount_point: &'a str,
 }
 
-impl<'a> Row<'a> {
-    fn read(line: &'a str) -> Option<Self> {
-        let words: Vec<(usize, &str)> = line
-            .split_whitespace()
-            .map(|w| (w.as_ptr() as usize - line.as_ptr() as usize, w))
-            .collect();
-        (4..words.len()).find_map(|capacity| {
-            let (at, word) = words[capacity];
-            let mount_point = line[at + word.len()..].trim_start();
-            let columns = &words[capacity - 3..capacity];
-            (is_capacity(word)
-                && mount_point.starts_with('/')
-                && columns.iter().all(|(_, w)| is_block_count(w)))
-            .then(|| Row {
-                filesystem: line[..columns[0].0].trim(),
-                blocks: columns[0].1,
-                available: columns[2].1,
-                mount_point,
-            })
+/// `df -P` pads its columns and quotes no name, so a Filesystem name and a
+/// mount point may both hold spaces. A row is read around its first run of
+/// four measurements (`blocks used available capacity%`, each `-` when
+/// unknown) that is followed by an absolute mount point: what precedes the run
+/// is the Filesystem, what follows it is the mount point, each kept whole.
+fn row(line: &str) -> Option<Row<'_>> {
+    let words: Vec<(usize, &str)> = line
+        .split_whitespace()
+        .map(|w| (w.as_ptr() as usize - line.as_ptr() as usize, w))
+        .collect();
+    let count = |w: &str| w == "-" || w.bytes().all(|b| b.is_ascii_digit());
+    (1..words.len().saturating_sub(4)).find_map(|i| {
+        let [
+            (_, size),
+            (_, used),
+            (_, available),
+            (_, capacity),
+            (mount_at, mount),
+        ] = words[i..i + 5]
+        else {
+            return None;
+        };
+        let share = capacity == "-"
+            || capacity
+                .strip_suffix('%')
+                .is_some_and(|n| !n.is_empty() && count(n));
+        if !(count(size) && count(used) && count(available) && share && mount.starts_with('/')) {
+            return None;
+        }
+        let (start, _) = words[0];
+        let (end, last) = words[i - 1];
+        Some(Row {
+            filesystem: &line[start..end + last.len()],
+            size,
+            available,
+            mount_point: &line[mount_at..],
         })
-    }
-}
-
-fn is_block_count(word: &str) -> bool {
-    word == "-" || word.bytes().all(|b| b.is_ascii_digit())
-}
-
-fn is_capacity(word: &str) -> bool {
-    word == "-"
-        || word
-            .strip_suffix('%')
-            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    })
 }
 
 fn bytes(text: &str) -> Option<u64> {
@@ -147,4 +149,84 @@ fn bytes(text: &str) -> Option<u64> {
         return None;
     }
     text.parse::<u64>().ok()?.checked_mul(1024)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Volume, parse};
+
+    const HEADER: &str = "Filesystem 1024-blocks Used Available Capacity Mounted on\n";
+
+    fn only(row: &str) -> Volume {
+        let mut volumes = parse(&format!("{HEADER}{row}\n")).unwrap().volumes;
+        assert_eq!(volumes.len(), 1);
+        volumes.remove(0)
+    }
+
+    #[test]
+    fn a_filesystem_name_with_spaces_is_read_whole() {
+        let v = only(
+            "devices -- file:///Users/someone/Library/Containers/com.apple.CoreDevice.CoreDeviceService/Data/  1073741824         0 1073741824     0%    /Users/someone/Library/Developer/CoreDevice/DeviceFS",
+        );
+        assert_eq!(
+            v.filesystem,
+            "devices -- file:///Users/someone/Library/Containers/com.apple.CoreDevice.CoreDeviceService/Data/"
+        );
+        assert_eq!(
+            v.mount_point,
+            "/Users/someone/Library/Developer/CoreDevice/DeviceFS"
+        );
+        assert_eq!(v.size_bytes, Some(1073741824 * 1024));
+        assert_eq!(v.free_bytes, Some(1073741824 * 1024));
+    }
+
+    #[test]
+    fn a_mount_point_with_spaces_is_read_whole() {
+        let v = only("/dev/disk4s1  1000  400  600    40%    /Volumes/My  Disk 2");
+        assert_eq!(v.filesystem, "/dev/disk4s1");
+        assert_eq!(v.mount_point, "/Volumes/My  Disk 2");
+        assert_eq!(v.size_bytes, Some(1024000));
+        assert_eq!(v.free_bytes, Some(614400));
+    }
+
+    #[test]
+    fn spaces_on_both_sides_are_told_apart_by_the_measurement_run() {
+        let v = only("//someone@nas/Shared Media 2  2000 1000 1000 50% /Volumes/Shared Media 2");
+        assert_eq!(v.filesystem, "//someone@nas/Shared Media 2");
+        assert_eq!(v.mount_point, "/Volumes/Shared Media 2");
+        assert_eq!(v.size_bytes, Some(2048000));
+    }
+
+    #[test]
+    fn unknown_measurements_stay_unknown() {
+        let v = only("/dev/unknown - - - - /Volumes/unknown");
+        assert_eq!(v.mount_point, "/Volumes/unknown");
+        assert_eq!((v.size_bytes, v.free_bytes), (None, None));
+    }
+
+    #[test]
+    fn a_captured_report_with_the_coredevice_mount_reads_every_volume() {
+        let volumes = parse(include_str!("../../tests/fixtures/df-coredevice.txt"))
+            .unwrap()
+            .volumes;
+        assert_eq!(volumes.len(), 15);
+        assert!(volumes.iter().any(|v| v.mount_point == "/"));
+        let device = volumes
+            .iter()
+            .find(|v| v.mount_point == "/Users/someone/Library/Developer/CoreDevice/DeviceFS")
+            .unwrap();
+        assert!(device.filesystem.starts_with("devices -- file:///"));
+        assert!(volumes.iter().all(|v| v.size_bytes.is_some()));
+    }
+
+    #[test]
+    fn a_row_with_no_measurement_run_or_no_absolute_mount_is_refused() {
+        for row in [
+            "truncated",
+            "/dev/a 1000 500 500 50%",
+            "/dev/a 1000 500 500 50% relative",
+        ] {
+            assert!(parse(&format!("{HEADER}{row}\n")).is_err(), "{row}");
+        }
+    }
 }

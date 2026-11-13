@@ -3,6 +3,8 @@ pub struct Inventory {
     pub cwd: Option<String>,
     pub files: Vec<File>,
     pub sockets: Vec<Socket>,
+    /// Mount points lsof warned it could not stat(); entries on them may be missing.
+    pub unstatted_mounts: Vec<String>,
 }
 pub struct File {
     pub fd: String,
@@ -20,11 +22,14 @@ pub struct Socket {
 }
 
 /// Rejects absent/mismatched process headers and incomplete file records instead of inventing emptiness.
-pub fn parse(text: &str, pid: u32) -> Result<Inventory, &'static str> {
+/// `diagnostics` is lsof's stderr: only per-mount `can't stat()` warnings are accepted, and
+/// their mount points are kept; any other diagnostic refuses the whole inventory.
+pub fn parse(text: &str, diagnostics: &str, pid: u32) -> Result<Inventory, &'static str> {
     let mut result = Inventory {
         cwd: None,
         files: Vec::new(),
         sockets: Vec::new(),
+        unstatted_mounts: unstatted_mounts(diagnostics)?,
     };
     let mut seen = false;
     let mut fields = Vec::new();
@@ -58,6 +63,29 @@ pub fn parse(text: &str, pid: u32) -> Result<Inventory, &'static str> {
         record(&fields, &mut result)?;
     }
     Ok(result)
+}
+const UNKNOWN_DIAGNOSTIC: &str = "lsof reported diagnostics; file inventory may be incomplete";
+/// macOS lsof warns `lsof: WARNING: can't stat() <type> file system <mount>` for a mount it
+/// cannot stat (such as another user's), indents its continuation lines, then reports normally.
+fn unstatted_mounts(diagnostics: &str) -> Result<Vec<String>, &'static str> {
+    let mut mounts = Vec::new();
+    for line in diagnostics.lines().filter(|line| !line.trim().is_empty()) {
+        if let Some(warning) = line.strip_prefix("lsof: WARNING: can't stat() ") {
+            match warning.split_once(" file system ") {
+                Some((_, mount)) if !mount.trim().is_empty() => mounts.push(mount.into()),
+                _ => return Err(UNKNOWN_DIAGNOSTIC),
+            }
+        } else {
+            let continuation = line.trim_start();
+            let known = continuation == "Output information may be incomplete."
+                || (continuation.starts_with("assuming \"dev=")
+                    && continuation.ends_with("\" from mount table"));
+            if mounts.is_empty() || continuation.len() == line.len() || !known {
+                return Err(UNKNOWN_DIAGNOSTIC);
+            }
+        }
+    }
+    Ok(mounts)
 }
 fn record(fields: &[&str], result: &mut Inventory) -> Result<(), &'static str> {
     let field = |prefix: char| fields.iter().find_map(|s| s.strip_prefix(prefix));

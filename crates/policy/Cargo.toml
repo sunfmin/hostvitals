@@ -13,7 +13,7 @@ flux-alloc.workspace = true
 
 [package.metadata.flux]
 enabled = true
-check_overflow = "strict"
+check-overflow = "strict"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(flux)'] }

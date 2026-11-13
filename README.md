@@ -18,7 +18,7 @@ npx skills add sunfmin/hostvitals
 
 Some measurements need root and are skipped without it. hostvitals never runs `sudo` itself; `hostvitals doctor` reports the observation capabilities here and the fixes for anything missing.
 
-Build locally with `cargo build --locked -p hostvitals` on macOS arm64 or x86_64. Stable Rust builds the binary; the pinned nightly runs the verification gate. `./gate.sh` is the same gate locally and in CI: format, Flux alone (no trusted or ignored functions), clippy, release packaging checks, then nextest. The checker versions and nightly live in `Cargo.toml`; `./verify.sh` rejects mismatches with installation instructions. Install nextest with `brew install cargo-nextest`.
+Build locally with `cargo build --locked -p hostvitals` on macOS arm64 or x86_64. Stable Rust builds the binary and runs the gate. `./gate.sh` is the same gate locally and in CI: format, Flux alone (no trusted or ignored functions), clippy, release packaging checks, then nextest. Flux comes from Homebrew's `sunfmin/tap/flux-toolchain`, the newest the tap has, with the `fixpoint`, `z3` and Rust nightly it runs on; `./verify.sh` refuses an older or missing one and `./verify.sh install` installs or upgrades it. The `flux-rs` crates in `Cargo.toml` are pinned to the Flux commit that `brew info sunfmin/tap/flux-toolchain` names. Install nextest with `brew install cargo-nextest`.
 
 `hostvitals process <pid> [--seconds 3]` observes one Process: identity and responsible App, redacted argv, cwd, cumulative/window CPU and disk bytes, Resident, Footprint and lifetime peak, cumulative energy, threads, open files and sockets. Reverse names share one two-second deadline; failed lookups retain the remote IP. Another user's Process is ps-only without root. Root also reads filesystem activity over the window. Every optional denied/missing reading is null with a `skipped` reason and retry line. `hostvitals process --help` documents every key, observation limit and privilege rule.
 
@@ -28,7 +28,7 @@ The effect crate owns native reads, CLI execution and JSON. The policy crate has
 
 Profile retains sample's full output in a distinct private directory under `$TMPDIR/hostvitals/` and returns `report_path`. Its summary uses those same bytes; progress output is never a second observation. Reports are owner-only (0600) inside owner-only directories (0700), remain readable after exit, and may be purged by macOS. Remove the returned report's containing profile directory when finished. Other commands, including doctor, save no reports. `hostvitals profile --help` documents every JSON key, ranking semantics, partial results and collection limits.
 
-The gate checks the actual pure Profile parser and its [counted-call-graph regressions](docs/verification/flux-loop-joins.md). That note records the pinned checker's loop-join defect and the verified helper extraction used by the parser; runtime tests and Flux share the product source.
+The gate checks the actual pure Profile parser and its [counted-call-graph regressions](docs/verification/flux-loop-joins.md). That note records the loop-join defect of the Flux checker it was found with and the verified helper extraction used by the parser; runtime tests and Flux share the product source.
 
 The [live ended-Process regression](docs/verification/profile-ended-process.md) coordinates its target's lifetime with sample's collection announcement, including a delayed observer launch. It verifies useful samples, the summary of the retained report and private permissions through the real binary.
 

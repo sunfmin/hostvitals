@@ -15,6 +15,7 @@ mod iostat;
 pub(crate) mod lsof;
 pub(crate) mod names;
 pub(crate) mod nettop;
+pub(crate) mod notifyutil;
 pub(crate) mod pmset;
 pub(crate) mod powermetrics;
 pub(crate) mod ps;
@@ -33,7 +34,7 @@ pub enum Tool {
     Nettop,
     /// Combined disk I/O (does not verify directional rates); found on PATH.
     Iostat,
-    /// Directional block-storage byte counters, including virtual devices; found on PATH.
+    /// Directional block-storage byte counters, including virtual devices, and each GPU's utilization; found on PATH.
     Ioreg,
     /// Mounted local volumes' capacity and available space; found on PATH.
     Df,
@@ -43,8 +44,10 @@ pub enum Tool {
     Vmmap,
     /// Entitled charged-memory inspection; found on PATH.
     Footprint,
-    /// Power-source and energy status; found on PATH.
+    /// Power-source and energy status, and CPU speed limits; found on PATH.
     Pmset,
+    /// macOS's thermal pressure level; found on PATH.
+    Notifyutil,
     /// Component power; requires root and is otherwise skipped.
     Powermetrics,
     /// Filesystem activity; requires root and is otherwise skipped.
@@ -88,6 +91,7 @@ impl Tool {
             Self::Vmmap => vmmap::args(&pid),
             Self::Footprint => footprint::args(&pid),
             Self::Pmset => pmset::args(&pid),
+            Self::Notifyutil => notifyutil::args(),
             Self::Powermetrics => powermetrics::args(&pid),
             Self::FsUsage => fs_usage::args(&pid, "1"),
             Self::Lsof => lsof::args(&pid),

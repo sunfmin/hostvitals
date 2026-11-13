@@ -13,6 +13,62 @@ pub fn snapshot() -> Result<BTreeMap<u64, Counters>, String> {
     parse(text.as_bytes()).map_err(|e| format!("ioreg plist: {e}"))
 }
 
+fn accelerator_args() -> Vec<&'static str> {
+    vec!["-a", "-r", "-c", "IOAccelerator", "-d", "1"]
+}
+
+/// One GPU's instantaneous utilization, as its driver reports it in the I/O Registry.
+#[derive(serde::Serialize)]
+pub(crate) struct Accelerator {
+    /// The driver's registry class, such as `AGXAcceleratorG16X`.
+    pub name: String,
+    pub registry_id: u64,
+    /// `PerformanceStatistics` "Device Utilization %"; None when absent or outside 0–100.
+    pub utilization_percent: Option<u64>,
+}
+
+/// Every IOAccelerator; an empty registry is an error rather than a GPU-less answer.
+pub(crate) fn accelerators() -> Result<Vec<Accelerator>, String> {
+    let text = super::capture(super::Tool::Ioreg, accelerator_args())
+        .map_err(|reason| format!("ioreg IOAccelerator: {reason}"))?;
+    parse_accelerators(text.as_bytes()).map_err(|e| format!("ioreg IOAccelerator: {e}"))
+}
+
+fn parse_accelerators(bytes: &[u8]) -> Result<Vec<Accelerator>, String> {
+    // ioreg prints nothing at all when no entry matches the class.
+    if bytes.iter().all(u8::is_ascii_whitespace) {
+        return Err("no IOAccelerator in the I/O Registry".into());
+    }
+    let entries = entries(bytes)?;
+    if entries.is_empty() {
+        return Err("no IOAccelerator in the I/O Registry".into());
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    entries
+        .into_iter()
+        .map(|entry| {
+            let registry_id = registry_id(&entry)?;
+            if !seen.insert(registry_id) {
+                return Err("ioreg has a duplicate registry identity".to_string());
+            }
+            let Some(Node::String(name)) = entry.get("IOObjectClass") else {
+                return Err("ioreg accelerator has no class".into());
+            };
+            let utilization_percent = match entry.get("PerformanceStatistics") {
+                Some(Node::Dict(stats)) => {
+                    integer(stats.get("Device Utilization %")).filter(|n| *n <= 100)
+                }
+                _ => None,
+            };
+            Ok(Accelerator {
+                name: name.clone(),
+                registry_id,
+                utilization_percent,
+            })
+        })
+        .collect()
+}
+
 pub(super) fn probe(path: PathBuf) -> Result<(), String> {
     let report = super::execute(
         Command::new(path).args(args()),
@@ -30,7 +86,8 @@ pub(super) fn probe(path: PathBuf) -> Result<(), String> {
     }
 }
 
-fn parse(bytes: &[u8]) -> Result<BTreeMap<u64, Counters>, String> {
+/// Reads ioreg's top-level array of registry entries, each a dictionary.
+fn entries(bytes: &[u8]) -> Result<Vec<BTreeMap<String, Node>>, String> {
     let mut reader = Reader::from_reader(bytes);
     reader.config_mut().expand_empty_elements = true;
     if next(&mut reader)? != Tag::Start("plist".to_string()) {
@@ -46,21 +103,33 @@ fn parse(bytes: &[u8]) -> Result<BTreeMap<u64, Counters>, String> {
     let Node::Array(entries) = report else {
         return Err("ioreg inventory is not an array".into());
     };
+    entries
+        .into_iter()
+        .map(|entry| match entry {
+            Node::Dict(entry) => Ok(entry),
+            _ => Err("ioreg entry is not a dictionary".into()),
+        })
+        .collect()
+}
+
+fn registry_id(entry: &BTreeMap<String, Node>) -> Result<u64, String> {
+    integer(entry.get("IORegistryEntryID"))
+        .filter(|n| *n > 0)
+        .ok_or_else(|| "ioreg entry has no unsigned registry identity".into())
+}
+
+fn parse(bytes: &[u8]) -> Result<BTreeMap<u64, Counters>, String> {
+    let entries = entries(bytes)?;
     if entries.is_empty() {
         return Err("ioreg has no block-storage inventory".into());
     }
     let mut counters = BTreeMap::new();
     for entry in entries {
-        let Node::Dict(entry) = entry else {
-            return Err("ioreg entry is not a dictionary".into());
-        };
         if !matches!(entry.get("IOObjectClass"), Some(Node::String(s)) if s == "IOBlockStorageDriver")
         {
             return Err("ioreg returned an unrecognized block-storage entry".into());
         }
-        let id = integer(entry.get("IORegistryEntryID"))
-            .filter(|n| *n > 0)
-            .ok_or("ioreg entry has no unsigned registry identity")?;
+        let id = registry_id(&entry)?;
         let stats = match entry.get("Statistics") {
             Some(Node::Dict(stats)) => Some(stats),
             _ => None,

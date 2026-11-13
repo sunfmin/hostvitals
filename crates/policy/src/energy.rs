@@ -237,6 +237,55 @@ pub fn parse_thermal(text: &str) -> Result<Thermal, &'static str> {
     Ok(thermal)
 }
 
+/// macOS's thermal pressure level, the judgement behind its thermal throttling.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThermalPressure {
+    Nominal,
+    Moderate,
+    Heavy,
+    Trapping,
+    Sleeping,
+}
+impl ThermalPressure {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Nominal => "nominal",
+            Self::Moderate => "moderate",
+            Self::Heavy => "heavy",
+            Self::Trapping => "trapping",
+            Self::Sleeping => "sleeping",
+        }
+    }
+}
+
+/// The notification key whose state macOS sets to its thermal pressure level.
+pub const THERMAL_PRESSURE_KEY: &str = "com.apple.system.thermalpressurelevel";
+
+/// Reads `notifyutil -g` for the thermal pressure key: exactly one line naming the key and one known level.
+pub fn parse_thermal_pressure(text: &str) -> Result<ThermalPressure, &'static str> {
+    let mut lines = text.lines().filter(|line| !line.trim().is_empty());
+    let line = lines.next().ok_or("empty thermal pressure report")?;
+    if lines.next().is_some() {
+        return Err("more than one thermal pressure line");
+    }
+    let mut fields = line.split_whitespace();
+    if fields.next() != Some(THERMAL_PRESSURE_KEY) {
+        return Err("report does not name the thermal pressure key");
+    }
+    let level = fields.next().ok_or("missing thermal pressure level")?;
+    if fields.next().is_some() {
+        return Err("trailing thermal pressure fields");
+    }
+    match level {
+        "0" => Ok(ThermalPressure::Nominal),
+        "1" => Ok(ThermalPressure::Moderate),
+        "2" => Ok(ThermalPressure::Heavy),
+        "3" => Ok(ThermalPressure::Trapping),
+        "4" => Ok(ThermalPressure::Sleeping),
+        _ => Err("unknown thermal pressure level"),
+    }
+}
+
 pub struct GpuTimes {
     pub window_seconds: f64,
     pub milliseconds: BTreeMap<u32, f64>,

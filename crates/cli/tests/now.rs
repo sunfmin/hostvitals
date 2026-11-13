@@ -38,9 +38,17 @@ impl Lab {
             .filter_map(|l| l.split_whitespace().next())
             .map(|pid| format!("process {pid} 0.0 0.0 0.0\n"))
             .collect();
-        for tool in ["top", "pmset", "powermetrics"] {
+        for tool in ["top", "pmset", "powermetrics", "notifyutil"] {
             std::os::unix::fs::symlink(&standin, lab.0.join("bin").join(tool)).unwrap();
         }
+        lab.write(
+            "notifyutil",
+            json!({"stdout":include_str!("../../policy/tests/fixtures/notifyutil-thermal-pressure.txt")}),
+        );
+        lab.write(
+            "ioreg-IOAccelerator",
+            json!({"stdout":include_str!("fixtures/ioreg-accelerator.xml")}),
+        );
         lab.write(
             "top",
             json!({"stdout":format!("PID POWER\n{energy_rows}PID POWER\n{energy_rows}")}),
@@ -59,7 +67,7 @@ impl Lab {
             .into_iter()
             .enumerate()
         {
-            lab.write(&format!("now-host-{i}"), json!({"status":"available","data":{"euid":501,"cpu_ticks":ticks,"logical_cores":8,"physical_cores":4,"load_average":[2.0,3.0,4.0],"memory":{"total_bytes":51539607552u64,"free_percent":12,"pressure":"warn","swap_used_bytes":8568459428u64,"swap_total_bytes":9663676416u64,"compressed_bytes":3221225472u64}}}));
+            lab.write(&format!("now-host-{i}"), json!({"status":"available","data":{"euid":501,"cpu_ticks":ticks,"logical_cores":8,"physical_cores":4,"load_average":[2.0,3.0,4.0],"memory":{"total_bytes":51539607552u64,"free_percent":12,"pressure_level":{"status":"available","data":2},"swap_used_bytes":8568459428u64,"swap_total_bytes":9663676416u64,"compressed_bytes":3221225472u64}}}));
         }
         lab
     }
@@ -79,7 +87,7 @@ impl Lab {
             let path = self.0.join(format!("now-host-{i}.json"));
             let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
             value["data"]["memory"] = json!({
-                "total_bytes":total_bytes, "free_percent":50, "pressure":"normal",
+                "total_bytes":total_bytes, "free_percent":50, "pressure_level":{"status":"available","data":1},
                 "swap_used_bytes":800, "swap_total_bytes":1000, "compressed_bytes":0
             });
             fs::write(path, value.to_string()).unwrap();
@@ -707,7 +715,7 @@ fn battery_and_thermal_report_charge_source_time_and_cpu_limiting() {
         assert_eq!(a["host"]["battery"], expected);
         assert_eq!(
             a["host"]["thermal"],
-            json!({"cpu_speed_limit_percent":75,"cpu_scheduler_limit_percent":90,"available_cpus":6,"cpu_throttled":true})
+            json!({"pressure":"nominal","cpu_speed_limit_percent":75,"cpu_scheduler_limit_percent":90,"available_cpus":6,"cpu_throttled":true})
         );
         let finding = a["findings"]
             .as_array()
@@ -995,11 +1003,19 @@ fn optional_energy_cli_failures_leave_cpu_memory_network_and_power_answered() {
     assert_eq!(a["host"]["network"]["bytes_out_per_second"], 0.0);
     assert_eq!(a["host"]["power"]["cpu_watts"], 0.0);
     assert!(a["host"]["battery"].is_null());
-    assert!(a["host"]["thermal"].is_null());
+    assert_eq!(
+        a["host"]["thermal"],
+        json!({"pressure":"nominal","cpu_speed_limit_percent":null,"cpu_scheduler_limit_percent":null,"available_cpus":null,"cpu_throttled":null})
+    );
     assert!(a["processes"][0]["energy_impact"].is_null());
     assert!(a["processes"][0]["gpu_time_ms"].is_null());
     assert_eq!(a["rankings"]["processes_by_energy"], json!([]));
-    for key in ["battery", "thermal", "gpu_time_ms", "energy_impact"] {
+    for key in [
+        "battery",
+        "thermal.cpu_limits",
+        "gpu_time_ms",
+        "energy_impact",
+    ] {
         let skipped = a["skipped"]
             .as_array()
             .unwrap()
@@ -1399,6 +1415,9 @@ fn now_rejects_invalid_limits_and_explains_every_answer_key() {
         "cpu_scheduler_limit_percent",
         "available_cpus",
         "cpu_throttled",
+        "gpu",
+        "registry_id",
+        "utilization_percent",
         "power",
         "cpu_watts",
         "gpu_watts",
@@ -1886,6 +1905,34 @@ fn live_now_reads_host_and_every_user_without_root() {
     }
     assert!(a["host"]["battery"]["present"].is_boolean());
     assert!(a["host"]["thermal"]["cpu_throttled"].is_boolean());
+    let skipped_measurement = |name: &str| {
+        a["skipped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["measurement"] == name)
+    };
+    let thermal_pressure = &a["host"]["thermal"]["pressure"];
+    assert!(
+        ["nominal", "moderate", "heavy", "trapping", "sleeping"]
+            .contains(&thermal_pressure.as_str().unwrap_or_default())
+            || (thermal_pressure.is_null() && skipped_measurement("thermal.pressure")),
+        "{a}"
+    );
+    match a["host"]["gpu"].as_array() {
+        Some(devices) => {
+            assert!(!devices.is_empty());
+            for device in devices {
+                assert!(!device["name"].as_str().unwrap().is_empty());
+                assert!(device["registry_id"].as_u64().unwrap() > 0);
+                match device["utilization_percent"].as_u64() {
+                    Some(percent) => assert!(percent <= 100),
+                    None => assert!(skipped_measurement("gpu.utilization_percent")),
+                }
+            }
+        }
+        None => assert!(skipped_measurement("gpu"), "{a}"),
+    }
     for key in ["cpu_watts", "gpu_watts", "ane_watts", "gpu_active_share"] {
         let power = &a["host"]["power"];
         if let Some(value) = power[key].as_f64() {
@@ -1939,6 +1986,7 @@ fn live_now_reads_host_and_every_user_without_root() {
     assert!(
         ["normal", "warn", "critical"].contains(&a["host"]["memory"]["pressure"].as_str().unwrap())
     );
+    assert!(a["host"]["memory"].get("pressure_level").is_none());
     assert!(
         a["host"]["memory"]["swap_used_bytes"].as_u64().unwrap()
             <= a["host"]["memory"]["swap_total_bytes"].as_u64().unwrap()
@@ -2003,4 +2051,238 @@ fn snapshot_keeps_processes_with_unusable_accounting_names() {
             .iter()
             .all(|call| call[2] == "pid=,ppid=,uid=,user=,time=,rss=,lstart=,ucomm=")
     );
+}
+
+fn skip<'a>(a: &'a Value, measurement: &str) -> &'a Value {
+    a["skipped"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["measurement"] == measurement)
+        .unwrap_or_else(|| panic!("no {measurement} in {a}"))
+}
+
+fn set_pressure_level(lab: &Lab, reading: Value) {
+    for i in 0..2 {
+        let path = lab.0.join(format!("now-host-{i}.json"));
+        let mut h: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        h["data"]["memory"]["pressure_level"] = reading.clone();
+        fs::write(path, h.to_string()).unwrap();
+    }
+}
+
+#[test]
+fn unreadable_or_unknown_memory_pressure_is_missing_with_its_reason_and_judges_nothing() {
+    for (reading, reason) in [
+        (
+            json!({"status":"unavailable","reason":"kern.memorystatus_vm_pressure_level: Operation not permitted"}),
+            "Operation not permitted",
+        ),
+        (
+            json!({"status":"available","data":3}),
+            "unknown kern.memorystatus_vm_pressure_level 3",
+        ),
+    ] {
+        let rows = row(10, 501, "0:00.00", 1, "/App");
+        let lab = Lab::new(rows.clone(), rows);
+        lab.process(10, 10);
+        set_pressure_level(&lab, reading);
+        let a = lab.answer();
+        assert!(a["host"]["memory"]["pressure"].is_null(), "{a}");
+        assert_eq!(a["host"]["memory"]["total_bytes"], 51539607552u64);
+        assert_eq!(a["host"]["memory"]["swap_used_bytes"], 8568459428u64);
+        assert!(a["host"]["cpu"]["user_percent"].is_number());
+        let skipped = skip(&a, "host.memory.pressure");
+        assert_eq!(skipped["count"], 1);
+        assert!(
+            skipped["reason"].as_str().unwrap().contains(reason),
+            "{skipped}"
+        );
+        assert_eq!(skipped["fix"], "hostvitals doctor && hostvitals now");
+        let rules: Vec<_> = a["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["rule"].as_str().unwrap())
+            .collect();
+        assert!(!rules.contains(&"memory_pressure"), "{rules:?}");
+        assert!(rules.contains(&"swap_used"), "{rules:?}");
+    }
+}
+
+#[test]
+fn every_kernel_pressure_level_is_named_in_the_answer() {
+    for (level, name) in [(1, "normal"), (2, "warn"), (4, "critical")] {
+        let rows = row(10, 501, "0:00.00", 1, "/App");
+        let lab = Lab::new(rows.clone(), rows);
+        lab.process(10, 10);
+        set_pressure_level(&lab, json!({"status":"available","data":level}));
+        let a = lab.answer();
+        assert_eq!(a["host"]["memory"]["pressure"], name);
+        assert!(a["host"]["memory"].get("pressure_level").is_none());
+    }
+}
+
+#[test]
+fn thermal_pressure_reads_notifyutil_without_root_and_survives_its_failure() {
+    let rows = row(10, 501, "0:00.00", 1, "/App");
+    let lab = Lab::new(rows.clone(), rows.clone());
+    lab.process(10, 10);
+    lab.write(
+        "notifyutil",
+        json!({"stdout":"com.apple.system.thermalpressurelevel 2\n"}),
+    );
+    let a = lab.answer();
+    assert_eq!(a["host"]["thermal"]["pressure"], "heavy");
+    let state: Value =
+        serde_json::from_slice(&fs::read(lab.0.join("notifyutil.json")).unwrap()).unwrap();
+    assert_eq!(
+        state["calls"],
+        json!([["-g", "com.apple.system.thermalpressurelevel"]])
+    );
+    for failure in [
+        json!({"exit_code":1,"stderr":"notify failure"}),
+        json!({"stdout":"com.apple.system.thermalpressurelevel 9\n"}),
+    ] {
+        lab.write(
+            "ps",
+            json!({"stdout_readings":[rows.clone(), rows.clone()]}),
+        );
+        lab.write(
+            "pmset",
+            json!({"stdout_readings":["Now drawing from 'AC Power'\n","CPU_Speed_Limit = 75\n"]}),
+        );
+        lab.write("notifyutil", failure);
+        let a = lab.answer();
+        assert_eq!(
+            a["host"]["thermal"],
+            json!({"pressure":null,"cpu_speed_limit_percent":75,"cpu_scheduler_limit_percent":null,"available_cpus":null,"cpu_throttled":true})
+        );
+        let skipped = skip(&a, "thermal.pressure");
+        assert!(
+            skipped["reason"]
+                .as_str()
+                .unwrap()
+                .starts_with("notifyutil")
+        );
+        assert!(skipped["fix"].as_str().unwrap().contains("PATH="));
+    }
+    fs::remove_file(lab.0.join("bin/notifyutil")).unwrap();
+    lab.write(
+        "ps",
+        json!({"stdout_readings":[rows.clone(), rows.clone()]}),
+    );
+    let a = lab.answer();
+    assert!(a["host"]["thermal"]["pressure"].is_null());
+    assert!(
+        skip(&a, "thermal.pressure")["reason"]
+            .as_str()
+            .unwrap()
+            .contains("not found")
+    );
+}
+
+#[test]
+fn gpu_utilization_reads_the_recorded_accelerator_registry_without_root() {
+    let rows = row(10, 501, "0:00.00", 1, "/App");
+    let lab = Lab::new(rows.clone(), rows);
+    lab.process(10, 10);
+    let a = lab.answer();
+    assert_eq!(
+        a["host"]["gpu"],
+        json!([{"name":"AGXAcceleratorG16X","registry_id":4294968669u64,"utilization_percent":1}])
+    );
+    let state: Value =
+        serde_json::from_slice(&fs::read(lab.0.join("ioreg-IOAccelerator.json")).unwrap()).unwrap();
+    assert_eq!(
+        state["calls"],
+        json!([["-a", "-r", "-c", "IOAccelerator", "-d", "1"]])
+    );
+    // The block-storage reads keep their own state and readings.
+    let disk: Value = serde_json::from_slice(&fs::read(lab.0.join("ioreg.json")).unwrap()).unwrap();
+    assert_eq!(disk["calls"].as_array().unwrap().len(), 2);
+}
+
+fn accelerator(id: u64, class: &str, utilization: Option<&str>) -> String {
+    format!(
+        "<dict><key>IOObjectClass</key><string>{class}</string><key>IORegistryEntryID</key><integer>{id}</integer><key>PerformanceStatistics</key><dict>{}<key>Renderer Utilization %</key><integer>7</integer></dict></dict>",
+        utilization
+            .map(|u| format!("<key>Device Utilization %</key><integer>{u}</integer>"))
+            .unwrap_or_default()
+    )
+}
+
+#[test]
+fn every_accelerator_is_reported_and_an_unreadable_utilization_is_missing_not_zero() {
+    let rows = row(10, 501, "0:00.00", 1, "/App");
+    let lab = Lab::new(rows.clone(), rows.clone());
+    lab.process(10, 10);
+    let report = format!(
+        "<?xml version=\"1.0\"?><plist version=\"1.0\"><array>{}{}{}{}</array></plist>",
+        accelerator(7, "IntelAccelerator", Some("0")),
+        accelerator(
+            8,
+            "AMDRadeonX6000_AMDNavi10GraphicsAccelerator",
+            Some("100")
+        ),
+        accelerator(9, "NoStatistics", None),
+        accelerator(10, "OutOfRange", Some("101")),
+    );
+    lab.write("ioreg-IOAccelerator", json!({"stdout":report}));
+    let a = lab.answer();
+    assert_eq!(
+        a["host"]["gpu"],
+        json!([
+            {"name":"IntelAccelerator","registry_id":7,"utilization_percent":0},
+            {"name":"AMDRadeonX6000_AMDNavi10GraphicsAccelerator","registry_id":8,"utilization_percent":100},
+            {"name":"NoStatistics","registry_id":9,"utilization_percent":null},
+            {"name":"OutOfRange","registry_id":10,"utilization_percent":null}
+        ])
+    );
+    let skipped = skip(&a, "gpu.utilization_percent");
+    assert_eq!(skipped["count"], 2);
+    assert!(
+        skipped["reason"]
+            .as_str()
+            .unwrap()
+            .contains("Device Utilization %")
+    );
+    assert_eq!(a["host"]["memory"]["pressure"], "warn");
+}
+
+#[test]
+fn failed_empty_or_malformed_accelerator_reports_skip_only_the_gpu() {
+    let duplicate = format!(
+        "<?xml version=\"1.0\"?><plist version=\"1.0\"><array>{}{}</array></plist>",
+        accelerator(7, "A", Some("1")),
+        accelerator(7, "B", Some("2")),
+    );
+    for (state, reason) in [
+        (json!({"stdout":""}), "no IOAccelerator"),
+        (
+            json!({"exit_code":1,"stderr":"ioreg denied"}),
+            "ioreg denied",
+        ),
+        (json!({"stdout":"<plist><array>"}), "ioreg"),
+        (json!({"stdout":duplicate}), "duplicate registry identity"),
+        (
+            json!({"stdout":"<?xml version=\"1.0\"?><plist version=\"1.0\"><array><dict><key>IOObjectClass</key><string>A</string></dict></array></plist>"}),
+            "registry identity",
+        ),
+    ] {
+        let rows = row(10, 501, "0:00.00", 1, "/App");
+        let lab = Lab::new(rows.clone(), rows);
+        lab.process(10, 10);
+        lab.write("ioreg-IOAccelerator", state);
+        let a = lab.answer();
+        assert!(a["host"]["gpu"].is_null(), "{a}");
+        let skipped = skip(&a, "gpu");
+        assert!(
+            skipped["reason"].as_str().unwrap().contains(reason),
+            "{skipped}"
+        );
+        assert!(skipped["fix"].as_str().unwrap().contains("PATH="));
+        assert!(a["host"]["disk"]["read_bytes_per_second"].is_number());
+        assert_eq!(a["host"]["thermal"]["pressure"], "nominal");
+    }
 }

@@ -16,7 +16,8 @@ pub struct Snapshot {
 pub struct Memory {
     pub total_bytes: u64,
     pub free_percent: u32,
-    pub pressure: String,
+    /// The raw `kern.memorystatus_vm_pressure_level`; an unreadable level never fails the other readings.
+    pub pressure_level: Reading<i32>,
     pub swap_used_bytes: u64,
     pub swap_total_bytes: u64,
     pub compressed_bytes: u64,
@@ -105,12 +106,6 @@ fn snapshot() -> Result<Snapshot, String> {
     if unsafe { getloadavg(load.as_mut_ptr(), 3) } != 3 {
         return Err("cannot read load averages".into());
     }
-    let pressure = match sysctl::<i32>(c"kern.memorystatus_vm_pressure_level")? {
-        1 => "normal",
-        2 => "warn",
-        4 => "critical",
-        level => return Err(format!("unknown memory pressure level {level}")),
-    };
     let swap: Swap = sysctl(c"vm.swapusage")?;
     Ok(Snapshot {
         euid: effective_uid(),
@@ -121,7 +116,7 @@ fn snapshot() -> Result<Snapshot, String> {
         memory: Memory {
             total_bytes: sysctl(c"hw.memsize")?,
             free_percent: sysctl(c"kern.memorystatus_level")?,
-            pressure: pressure.into(),
+            pressure_level: Reading::from_result(sysctl(c"kern.memorystatus_vm_pressure_level")),
             swap_used_bytes: swap.used,
             swap_total_bytes: swap.total,
             compressed_bytes: sysctl(c"vm.compressor_bytes_used")?,

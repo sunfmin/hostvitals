@@ -1,11 +1,15 @@
-# Consecutive loops and the pinned Flux checker
+# Consecutive loops and the Flux checker at b2f3e31
 
 [control#98](https://github.com/sunfmin/control/issues/98) is resolved by a
 source-level remedy: move the final stack-draining loop into `finish_graph`.
 The complete supplied parser, including that helper, passes the existing
-checker. The Flux revision, spec crates, nightly, solver versions and proof
-requirements stay pinned as before. The underlying checker defect described
-below remains in that revision; this is a verified source shape for #57 to use.
+checker. The underlying checker defect described below was found and
+diagnosed at Flux b2f3e31e17727ffe08c2efee1e7aa0bc4f0a66f9, with
+nightly-2026-09-25, the checker then pinned; this is a verified source shape
+for #57 to use. Flux now comes from Homebrew's `sunfmin/tap/flux-toolchain`,
+the newest the tap has, and nothing pins it (sunfmin/control#851); the parser
+passes it too, and whether the defect remains in a later Flux has not been
+checked again.
 
 ## Reproduction and reduction
 
@@ -56,7 +60,7 @@ source introduced by this issue.
 
 ## Why the marker is missing
 
-This diagnosis uses the pinned Flux source, the pinned nightly's borrow-checking
+This diagnosis uses that Flux source, its nightly's borrow-checking
 MIR (`rustc -Zdump-mir=all`), and the checker trace/backtrace from
 `FLUXFLAGS=-Fdump-checker-trace=trace RUST_BACKTRACE=1 ./verify.sh profile`.
 
@@ -65,7 +69,7 @@ its `break` meet at `bb7`. That block contains only `StorageDead` statements
 and a `goto bb8`. `bb8` is the second loop's header and has `bb7` as its
 immediate dominator. Flux lowers storage statements to no-ops.
 
-At the pinned revision, in `crates/flux-refineck/src/checker.rs`:
+At that revision, in `crates/flux-refineck/src/checker.rs`:
 
 1. `check_goto` (around line 1206) follows `is_dummy_join` directly to the
    successor. `bb7` qualifies: multiple predecessors, only no-ops, one goto,

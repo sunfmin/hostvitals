@@ -15,6 +15,30 @@ gate_seconds: 3600
 ready_label: ready-for-agent
 ```
 
+The gate checks the policy crate with Flux, and `./verify.sh` checks it with
+Homebrew's `sunfmin/tap/flux-toolchain`, and refuses to while it is not
+installed or is older than the newest the tap has, the tap read fresh for the
+check (sunfmin/control#851, afkconvoy's ADR-0067). The tap builds it every
+day, with the `cargo-flux`, `fixpoint` and `z3` it runs, so nothing here pins
+or builds any of them. So a host without it is refused at the startup probe,
+and its work goes to a host that has it. The check is `verify.sh`'s own, run
+without checking anything, and how to install it is what the check says when
+it fails: `./verify.sh install`, which is `brew install
+sunfmin/tap/flux-toolchain`, or `brew upgrade` of it where it is installed and
+older, and does nothing where it is the newest. It is the need's `install`, so
+the host runs it where the check fails, then probes again. Its limit covers a
+bottle's download, with room for a slow network: nothing is built. The Rust
+nightly the tap's Flux runs on is added by its first run, the gate's.
+
+```yaml gate-needs
+checks:
+  - name: flux-toolchain
+    command: ./verify.sh --toolchain
+    seconds: 60
+    install: ./verify.sh install
+    install_seconds: 1800           # a download: nothing is built
+```
+
 The fleet cuts its first version, declared by `initial` below, when it goes
 idle without a version tag. After that it cuts a version with landed work
 past the newest `v*` tag ([afkconvoy ADR-0064](https://github.com/sunfmin/afkconvoy/blob/main/docs/adr/0064-the-fleet-cuts-its-own-versions.md)). It lands the version change

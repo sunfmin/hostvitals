@@ -505,6 +505,38 @@ fn malformed_failed_or_missing_volume_reports_are_unknown_not_empty_inventories(
 }
 
 #[test]
+fn a_filesystem_name_with_spaces_keeps_every_volume() {
+    // Xcode's CoreDevice mounts a devicefs whose name has spaces; it once
+    // dropped the whole volume inventory and gated main red (sunfmin/control#855).
+    let rows = row(1, 501, "0:00.00", 1, "/one");
+    let lab = Lab::new(rows.clone(), rows);
+    lab.process(1, 1);
+    lab.write("df",json!({"stdout":"Filesystem                                                                                        1024-blocks      Used  Available Capacity  Mounted on\n/dev/disk3s1s1                                                                                      482797652  13759480   49446476    22%    /\ndevices -- file:///Users/someone/Library/Containers/com.apple.CoreDevice.CoreDeviceService/Data/  1073741824         0 1073741824     0%    /Users/someone/Library/Developer/CoreDevice/DeviceFS\nmy disk 2 1000 500 500 50% /Volumes/my disk 2\n"}));
+    let a = lab.answer();
+    let volumes = a["volumes"]
+        .as_array()
+        .expect("mounted local volume inventory");
+    assert_eq!(volumes.len(), 3);
+    assert_eq!(volumes[0]["filesystem"], "/dev/disk3s1s1");
+    assert_eq!(volumes[0]["mount_point"], "/");
+    assert_eq!(volumes[0]["free_bytes"], 49446476u64 * 1024);
+    assert_eq!(
+        volumes[1],
+        json!({"filesystem":"devices -- file:///Users/someone/Library/Containers/com.apple.CoreDevice.CoreDeviceService/Data/","mount_point":"/Users/someone/Library/Developer/CoreDevice/DeviceFS","size_bytes":1099511627776u64,"free_bytes":1099511627776u64,"free_share":1.0})
+    );
+    assert_eq!(volumes[2]["filesystem"], "my disk 2");
+    assert_eq!(volumes[2]["mount_point"], "/Volumes/my disk 2");
+    assert_eq!(volumes[2]["free_bytes"], 512000);
+    assert!(
+        !a["skipped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["measurement"] == "volumes")
+    );
+}
+
+#[test]
 fn every_local_volume_has_capacity_and_only_strictly_low_free_space_suggests_diskreap() {
     let rows = row(1, 501, "0:00.00", 1, "/one");
     let lab = Lab::new(rows.clone(), rows);
@@ -553,6 +585,36 @@ fn every_local_volume_has_capacity_and_only_strictly_low_free_space_suggests_dis
             .iter()
             .any(|s| s["measurement"] == "volumes" && s["count"] == 2)
     );
+}
+
+#[test]
+fn volumes_read_a_captured_df_report_whose_filesystem_names_have_spaces() {
+    let rows = row(1, 501, "0:00.00", 1, "/one");
+    let lab = Lab::new(rows.clone(), rows);
+    lab.process(1, 1);
+    let report = include_str!("fixtures/df-coredevice.txt").to_owned()
+        + "//someone@nas/Shared Media  2000  1000  1000    50%    /Volumes/Shared Media\n";
+    lab.write("df", json!({"stdout": report}));
+    let a = lab.answer();
+    let volumes = a["volumes"]
+        .as_array()
+        .expect("mounted local volume inventory");
+    assert_eq!(volumes.len(), 16);
+    assert!(volumes.iter().any(|v| v["mount_point"] == "/"));
+    assert!(volumes.contains(&json!({
+        "filesystem": "devices -- file:///Users/someone/Library/Containers/com.apple.CoreDevice.CoreDeviceService/Data/",
+        "mount_point": "/Users/someone/Library/Developer/CoreDevice/DeviceFS",
+        "size_bytes": 1099511627776u64,
+        "free_bytes": 1099511627776u64,
+        "free_share": 1.0
+    })));
+    assert!(volumes.contains(&json!({
+        "filesystem": "//someone@nas/Shared Media",
+        "mount_point": "/Volumes/Shared Media",
+        "size_bytes": 2048000,
+        "free_bytes": 1024000,
+        "free_share": 0.5
+    })));
 }
 
 #[test]

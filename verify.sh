@@ -1,13 +1,22 @@
 #!/bin/sh
 # Checks the refinement types of every crate that enables Flux (its
 # Cargo.toml has `[package.metadata.flux]`), one crate at a time, so the last
-# summary Flux prints in each run is that crate's. Needs `cargo-flux`,
-# `fixpoint` and `z3` installed, each the one Cargo.toml pins: it refuses to
-# check with any other.
+# summary Flux prints in each run is that crate's.
+# Needs Homebrew's `sunfmin/tap/flux-toolchain`, the newest the tap has: its
+# `cargo-flux` brings the `fixpoint`, `z3` and Flux sysroot it was built with,
+# and nothing here pins or builds any of them (sunfmin/control#851,
+# afkconvoy's docs/adr/0067).
 #
 #   ./verify.sh                 check every Flux crate whole
 #   ./verify.sh first           check the functions whose path contains a name
 #   ./verify.sh <cargo flux arguments>
+#   ./verify.sh --list          print the name of each Flux crate, and exit
+#   ./verify.sh --toolchain     check only that the toolchain is installed and
+#                               the newest the tap has, and exit: the gate need
+#                               that docs/agents/afkconvoy.md declares
+#   ./verify.sh install         install the toolchain, or upgrade it to the
+#                               newest the tap has, then check as --toolchain
+#                               does: that gate need's install
 #
 # Before each crate it prints `verify: checking <its directory>` on stdout.
 set -e
@@ -20,58 +29,53 @@ if [ "${1:-}" = "--list" ]; then
     done
     exit 0
 fi
-# cargo-flux re-invokes `cargo +<its nightly>`, which only rustup's cargo
-# understands, and rustup needs some toolchain to start from.
-PATH="$HOME/.cargo/bin:$PATH"
-RUSTUP_TOOLCHAIN=$(sed -n 's/^nightly = "\(.*\)"$/\1/p' Cargo.toml)
-export PATH RUSTUP_TOOLCHAIN
-# The checker is the pinned one, or nothing is checked: another build of it
-# can pass or fail the same tree differently. Each tool is asked what it is,
-# which is as far as this goes:
-#   cargo-flux  reports the first seven digits of the Flux revision it was
-#               built from, and they are compared to the pinned revision's.
-#               Not checked: the rest of the revision, a change made to that
-#               source before the build, and the driver and libraries in
-#               ~/.flux, which report no revision and are installed with it.
-#   fixpoint    reports its version and its whole commit: both are compared.
-#   z3          reports its version, which is compared, and nothing of its
-#               build.
-flux_rev=$(sed -n 's/^flux-core = .*rev = "\([0-9a-f]*\)".*/\1/p' Cargo.toml)
-fixpoint_pin=$(sed -n 's/^fixpoint = "\(.*\)"$/\1/p' Cargo.toml)
-z3_pin=$(sed -n 's/^z3 = "\(.*\)"$/\1/p' Cargo.toml)
-if [ -z "$flux_rev" ] || [ -z "$fixpoint_pin" ] || [ -z "$z3_pin" ]; then
-    echo "verify: Cargo.toml must pin the Flux revision, fixpoint and z3, and one of them is not read from it" >&2
+formula=sunfmin/tap/flux-toolchain
+# brew where the PATH has it, or in either place it installs to.
+brew=$(command -v brew 2>/dev/null) || brew=
+[ -n "$brew" ] || for b in "$HOME/homebrew/bin/brew" /opt/homebrew/bin/brew; do
+    [ -x "$b" ] && brew=$b && break
+done
+if [ -z "$brew" ]; then
+    echo "verify: Flux comes from Homebrew's $formula, and no brew is on the PATH, in ~/homebrew or in /opt/homebrew: install Homebrew, then: brew install $formula" >&2
     exit 1
 fi
-flux_is=$(cargo flux --version 2>/dev/null | cut -d' ' -f2) || true
-fixpoint_is=$(fixpoint --version 2>/dev/null | sed -n 's/^fixpoint //p') || true
-z3_is=$(z3 --version 2>/dev/null | sed -n 's/^Z3 version \([^ ]*\).*/\1/p') || true
-pinned=yes
-case "$flux_is" in
-"") pinned= ;;
-*) case "$flux_rev" in "$flux_is"*) ;; *) pinned= ;; esac ;;
+installed() { "$brew" list --versions "$formula" 2>/dev/null | grep -q .; }
+outdated() { "$brew" outdated --quiet "$formula" 2>/dev/null | grep -q .; }
+# The tap is read fresh before it is compared with: the newest is the newest
+# the tap has now. A host that cannot reach it compares with what it last read.
+read_tap() {
+    "$brew" update --quiet >/dev/null 2>&1 ||
+        echo "verify: brew update failed: $formula is compared with the tap as this host last read it" >&2
+}
+case "${1:-}" in
+install)
+    read_tap
+    if ! installed; then
+        "$brew" install --quiet "$formula" >&2
+    elif outdated; then
+        "$brew" upgrade --quiet "$formula" >&2
+    fi
+    set -- --toolchain
+    ;;
+--toolchain) read_tap ;;
 esac
-if [ -z "$pinned" ]; then
-    cat >&2 <<EOF
-verify: cargo-flux is built from Flux ${flux_is:-(nothing reported)}, and Cargo.toml pins $flux_rev. Install the pinned one:
-    git clone https://github.com/flux-rs/flux && cd flux && git checkout $flux_rev && cargo xtask install
-EOF
+if ! installed; then
+    echo "verify: $formula is not installed. Install it, with ./verify.sh install, or: brew install $formula" >&2
+    exit 1
 fi
-if [ "$fixpoint_is" != "$fixpoint_pin" ]; then
-    pinned=
-    cat >&2 <<EOF
-verify: fixpoint is ${fixpoint_is:-(nothing reported)}, and Cargo.toml pins $fixpoint_pin. Install the pinned one, built at the commit in the brackets:
-    https://github.com/ucsd-progsys/liquid-fixpoint#how-to-build-and-install
-EOF
+if outdated; then
+    echo "verify: $formula $("$brew" list --versions "$formula" | cut -d' ' -f2-) is not the newest the tap has. Upgrade it, with ./verify.sh install, or: brew upgrade $formula" >&2
+    exit 1
 fi
-if [ "$z3_is" != "$z3_pin" ]; then
-    pinned=
-    cat >&2 <<EOF
-verify: z3 is ${z3_is:-(nothing reported)}, and Cargo.toml pins $z3_pin. Install the pinned one:
-    https://github.com/Z3Prover/z3/releases/tag/z3-$z3_pin
-EOF
+if [ "${1:-}" = --toolchain ]; then
+    exit 0
 fi
-[ -n "$pinned" ] || exit 1
+# The tap's cargo-flux comes first, so no cargo-flux, fixpoint or z3 an older
+# install left in ~/.local/bin or ~/.cargo/bin is the one run: it puts its own
+# fixpoint and z3 first. cargo-flux re-invokes `cargo +<its nightly>`, which
+# only rustup's cargo understands; rustup starts from rust-toolchain.toml's.
+PATH="$("$brew" --prefix "$formula")/bin:$HOME/.cargo/bin:$PATH"
+export PATH
 # Every run, the gate's or a hand's, stops a solver query of one function past
 # twenty seconds as an error naming it, checks on past it so one run names
 # every slow function, and times each, the file of timings kept out of the

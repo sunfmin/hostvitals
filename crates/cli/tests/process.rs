@@ -516,6 +516,34 @@ fn collector_warnings_and_malformed_files_never_become_complete_lists() {
 }
 
 #[test]
+fn a_mount_lsof_cannot_stat_but_recovers_from_the_mount_table_keeps_the_inventory() {
+    // Another user's Xcode CoreDevice devicefs: lsof warns and assumes its
+    // device from the mount table (sunfmin/control#855).
+    let recovered = "lsof: WARNING: can't stat() devicefs file system /Users/someone/Library/Developer/CoreDevice/DeviceFS\n      Output information may be incomplete.\n      assuming \"dev=30000003\" from mount table\n";
+    for (stderr, kept) in [
+        (recovered.to_string(), true),
+        (recovered.repeat(2), true),
+        (
+            "lsof: WARNING: can't stat() devicefs file system /x\n      Output information may be incomplete.\n"
+                .into(),
+            false,
+        ),
+        (format!("{recovered}lsof: WARNING: can't read kernel memory\n"), false),
+    ] {
+        let lab = Lab::new();
+        lab.write("process-owner", json!({"status":"available","data":0}));
+        let mut lsof: Value =
+            serde_json::from_slice(&fs::read(lab.0.join("lsof.json")).unwrap()).unwrap();
+        lsof["stderr"] = json!(stderr);
+        lab.write("lsof", lsof);
+        let (out, a) = lab.run();
+        assert!(out.status.success());
+        assert_eq!(a["open_files"].is_array(), kept, "{stderr}: {a}");
+        assert_eq!(a["sockets"].is_array(), kept, "{stderr}: {a}");
+    }
+}
+
+#[test]
 fn filesystem_activity_resolves_initial_and_new_descriptors_and_forgets_closed_ones() {
     let lab = Lab::new();
     lab.write("process-owner", json!({"status":"available","data":0}));

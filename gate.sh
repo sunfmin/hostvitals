@@ -15,6 +15,8 @@ cargo fmt --all --check
 
 # The gate's reading of Flux's summaries is itself tested.
 ./flux-summary-test.sh >/dev/null
+# So is its reading of which checker may run: fixpoint follows its nightly.
+./verify-test.sh >/dev/null
 
 # Flux runs first, alone: beside the tests it shares the cores, and its time
 # measures them. A solver query past twenty seconds fails naming its function

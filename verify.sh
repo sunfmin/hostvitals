@@ -2,10 +2,11 @@
 # Checks the refinement types of every crate that enables Flux (its
 # Cargo.toml has `[package.metadata.flux]`), one crate at a time, so the last
 # summary Flux prints in each run is that crate's. Needs `cargo-flux`,
-# `fixpoint` and `z3` installed, each the one Cargo.toml pins: it refuses to
-# check with any other.
+# `fixpoint` and `z3` installed: cargo-flux and z3 the ones Cargo.toml pins,
+# fixpoint any build that reports its version. It refuses to check otherwise.
 #
 #   ./verify.sh                 check every Flux crate whole
+#   ./verify.sh --toolchain     check only the installed checker, and exit
 #   ./verify.sh first           check the functions whose path contains a name
 #   ./verify.sh <cargo flux arguments>
 #
@@ -25,22 +26,26 @@ fi
 PATH="$HOME/.cargo/bin:$PATH"
 RUSTUP_TOOLCHAIN=$(sed -n 's/^nightly = "\(.*\)"$/\1/p' Cargo.toml)
 export PATH RUSTUP_TOOLCHAIN
-# The checker is the pinned one, or nothing is checked: another build of it
-# can pass or fail the same tree differently. Each tool is asked what it is,
-# which is as far as this goes:
+# cargo-flux and z3 are the pinned ones, or nothing is checked: another build
+# of either can pass or fail the same tree differently. fixpoint follows
+# liquid-fixpoint's nightly release, which the host installs and which moves
+# every night, so it is not pinned (sunfmin/control#732): it need only be
+# installed and report its version. Should a fixpoint change turn the gate's
+# answer wrong, pin it again. Each tool is asked what it is, which is as far
+# as this goes:
 #   cargo-flux  reports the first seven digits of the Flux revision it was
 #               built from, and they are compared to the pinned revision's.
 #               Not checked: the rest of the revision, a change made to that
 #               source before the build, and the driver and libraries in
 #               ~/.flux, which report no revision and are installed with it.
-#   fixpoint    reports its version and its whole commit: both are compared.
+#   fixpoint    reports its version and its commit: that it reports them is
+#               checked, and nothing more.
 #   z3          reports its version, which is compared, and nothing of its
 #               build.
 flux_rev=$(sed -n 's/^flux-core = .*rev = "\([0-9a-f]*\)".*/\1/p' Cargo.toml)
-fixpoint_pin=$(sed -n 's/^fixpoint = "\(.*\)"$/\1/p' Cargo.toml)
 z3_pin=$(sed -n 's/^z3 = "\(.*\)"$/\1/p' Cargo.toml)
-if [ -z "$flux_rev" ] || [ -z "$fixpoint_pin" ] || [ -z "$z3_pin" ]; then
-    echo "verify: Cargo.toml must pin the Flux revision, fixpoint and z3, and one of them is not read from it" >&2
+if [ -z "$flux_rev" ] || [ -z "$z3_pin" ]; then
+    echo "verify: Cargo.toml must pin the Flux revision and z3, and one of them is not read from it" >&2
     exit 1
 fi
 flux_is=$(cargo flux --version 2>/dev/null | cut -d' ' -f2) || true
@@ -57,11 +62,11 @@ verify: cargo-flux is built from Flux ${flux_is:-(nothing reported)}, and Cargo.
     git clone https://github.com/flux-rs/flux && cd flux && git checkout $flux_rev && cargo xtask install
 EOF
 fi
-if [ "$fixpoint_is" != "$fixpoint_pin" ]; then
+if [ -z "$fixpoint_is" ]; then
     pinned=
     cat >&2 <<EOF
-verify: fixpoint is ${fixpoint_is:-(nothing reported)}, and Cargo.toml pins $fixpoint_pin. Install the pinned one, built at the commit in the brackets:
-    https://github.com/ucsd-progsys/liquid-fixpoint#how-to-build-and-install
+verify: fixpoint reports no version: it is not installed, or it does not run. Install liquid-fixpoint's nightly binary for this platform into ~/.local/bin:
+    https://github.com/ucsd-progsys/liquid-fixpoint/releases/tag/nightly
 EOF
 fi
 if [ "$z3_is" != "$z3_pin" ]; then
@@ -72,6 +77,7 @@ verify: z3 is ${z3_is:-(nothing reported)}, and Cargo.toml pins $z3_pin. Install
 EOF
 fi
 [ -n "$pinned" ] || exit 1
+[ "${1:-}" != "--toolchain" ] || exit 0
 # Every run, the gate's or a hand's, stops a solver query of one function past
 # twenty seconds as an error naming it, checks on past it so one run names
 # every slow function, and times each, the file of timings kept out of the

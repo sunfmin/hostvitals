@@ -1,77 +1,106 @@
 #!/usr/bin/env bash
-# Tests how ./verify.sh --toolchain judges the installed checker, with stand-in
-# `cargo`, `fixpoint` and `z3` that say what they are as the real ones do:
-# cargo-flux and z3 must be the ones Cargo.toml pins, and fixpoint, which
-# follows liquid-fixpoint's nightly release (sunfmin/control#732), any build
-# that reports its version. The tools are put where verify.sh looks first,
-# $HOME/.cargo/bin, under a HOME of the test's own, with only the system's
-# directories after it on PATH.
+# Tests ./verify.sh's choice of checker: Homebrew's sunfmin/tap/flux-toolchain,
+# the newest the tap has, and nothing an older install left in ~/.cargo/bin or
+# ~/.local/bin. A stand-in brew answers as Homebrew does for a formula that is
+# not installed, installed and outdated, or installed and the newest; a
+# stand-in cargo runs the `cargo-flux` it finds first on the PATH.
 set -euo pipefail
 cd "$(dirname "$0")"
+root=$PWD
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 failures=0
-bin="$work/home/.cargo/bin"
-mkdir -p "$bin"
-
-flux_rev=$(sed -n 's/^flux-core = .*rev = "\([0-9a-f]*\)".*/\1/p' Cargo.toml)
-z3_pin=$(sed -n 's/^z3 = "\(.*\)"$/\1/p' Cargo.toml)
-
-# tool <name> <first line of its --version, or nothing to leave it out>
-tool() {
-  rm -f "$bin/$1"
-  [ -n "$2" ] || return 0
-  printf '#!/bin/sh\necho "%s"\n' "$2" >"$bin/$1"
-  chmod +x "$bin/$1"
-}
-# cargo-flux is run as `cargo flux --version`.
-flux() { tool cargo "cargo-flux ${1:0:10} (2026-10-09)"; }
-fixpoint() {
-  if [ -n "$1" ]; then
-    printf '#!/bin/sh\nprintf "\\nLiquid-Fixpoint Copyright 2009-25 Regents of the University of California.\\nAll Rights Reserved.\\n\\nfixpoint %s\\n"\n' "$1" >"$bin/fixpoint"
-    chmod +x "$bin/fixpoint"
-  else
-    rm -f "$bin/fixpoint"
-  fi
-}
-z3() { tool z3 "${1:+Z3 version $1 - 64 bit}"; }
-
-# expect <name> <status> <stderr substring>
-expect() {
-  local name=$1 want=$2 says=$3 status=0
-  HOME="$work/home" PATH="/usr/bin:/bin" ./verify.sh --toolchain 2>"$work/err" || status=$?
-  if [ "$status" -ne "$want" ] || ! case $(cat "$work/err") in *"$says"*) true ;; *) false ;; esac; then
-    echo "FAIL $name: exit $status, wanted $want; stderr: $(cat "$work/err"); wanted it to say: ${says:-anything}" >&2
-    failures=$((failures + 1))
-  else
-    echo "ok   $name"
-  fi
+fail() {
+  echo "verify-test: $1" >&2
+  failures=$((failures + 1))
 }
 
-flux "$flux_rev"
-z3 "$z3_pin"
-fixpoint "0.9.6.3.8 (684d0829c19fbee83b892c9f5e20c2598897297c)"
-expect "the formerly pinned fixpoint" 0 ""
-# The 2026-11 nightly the host installed, which turned main red while
-# fixpoint was pinned (sunfmin/control#855).
-fixpoint "0.9.6.3.8 (0b924442ce26a8f270bffac18ba6295bc7411646)"
-expect "a later nightly fixpoint" 0 ""
-fixpoint "0.9.7.0 (69e585b4aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)"
-expect "a newer fixpoint version" 0 ""
+# A copy of the checkout's scripts and manifests, so the run touches no
+# target directory of the real one.
+mkdir -p "$work/tree"
+cp verify.sh Cargo.toml "$work/tree/"
+cp -R crates "$work/tree/crates"
+rm -rf "$work/tree/crates"/*/src
 
-fixpoint ""
-expect "no fixpoint" 1 "fixpoint reports no version"
-fixpoint "0.9.6.3.8 (0b924442ce26a8f270bffac18ba6295bc7411646)"
+# brew: its state is the file $work/state (absent, outdated or newest); each
+# call is logged to $work/brew.log.
+mkdir -p "$work/bin" "$work/prefix/bin" "$work/home/.cargo/bin" "$work/home/.local/bin"
+cat >"$work/bin/brew" <<EOF
+#!/bin/sh
+echo "\$*" >>"$work/brew.log"
+state=\$(cat "$work/state")
+case "\$1" in
+update) exit 0 ;;
+list) [ "\$state" = absent ] || echo "sunfmin/tap/flux-toolchain 2026.11.12" ;;
+outdated) [ "\$state" != outdated ] || echo "sunfmin/tap/flux-toolchain" ;;
+--prefix) echo "$work/prefix" ;;
+install) echo newest >"$work/state" ;;
+upgrade) echo newest >"$work/state" ;;
+esac
+EOF
+# cargo: `cargo flux ...` runs the first cargo-flux on the PATH.
+cat >"$work/home/.cargo/bin/cargo" <<'EOF'
+#!/bin/sh
+sub=$1
+shift
+exec "cargo-$sub" "$@"
+EOF
+for place in prefix/bin:tap home/.cargo/bin:cargo home/.local/bin:local; do
+  printf '#!/bin/sh\necho "flux from %s"\n' "${place#*:}" >"$work/${place%%:*}/cargo-flux"
+done
+chmod +x "$work/bin/brew" "$work/home/.cargo/bin/cargo" "$work"/*/bin/cargo-flux "$work"/home/.*/bin/cargo-flux
 
-z3 "4.13.0"
-expect "another z3" 1 "z3 is 4.13.0, and Cargo.toml pins $z3_pin"
-z3 ""
-expect "no z3" 1 "z3 is (nothing reported)"
-z3 "$z3_pin"
+# run <state> <verify.sh arguments>: prints what verify.sh printed, both
+# streams, and its exit status on the last line.
+run() {
+  echo "$1" >"$work/state"
+  : >"$work/brew.log"
+  shift
+  local status=0
+  HOME="$work/home" PATH="$work/home/.local/bin:$work/home/.cargo/bin:$work/bin:/usr/bin:/bin" \
+    "$work/tree/verify.sh" "$@" 2>&1 || status=$?
+  echo "exit $status"
+}
 
-flux "0000000000000000000000000000000000000000"
-expect "another cargo-flux" 1 "cargo-flux is built from Flux 0000000000"
-tool cargo ""
-expect "no cargo-flux" 1 "cargo-flux is built from Flux (nothing reported)"
+out=$(run absent --toolchain)
+case "$out" in *"exit 1") ;; *) fail "--toolchain passes with no flux-toolchain installed: $out" ;; esac
+case "$out" in *"brew install sunfmin/tap/flux-toolchain"*) ;; *) fail "not installed, and the fix is not named: $out" ;; esac
+
+out=$(run outdated --toolchain)
+case "$out" in *"exit 1") ;; *) fail "--toolchain passes with an outdated flux-toolchain: $out" ;; esac
+case "$out" in *"brew upgrade sunfmin/tap/flux-toolchain"*) ;; *) fail "outdated, and the fix is not named: $out" ;; esac
+grep -q "^update" "$work/brew.log" || fail "--toolchain compares with the tap unread"
+
+out=$(run newest --toolchain)
+[ "$out" = "exit 0" ] || fail "--toolchain fails with the newest flux-toolchain: $out"
+
+out=$(run absent install)
+[ "$out" = "exit 0" ] || fail "install leaves the toolchain wanting: $out"
+grep -q '^install .*sunfmin/tap/flux-toolchain' "$work/brew.log" || fail "install does not brew install it: $(cat "$work/brew.log")"
+
+out=$(run outdated install)
+[ "$out" = "exit 0" ] || fail "install leaves an outdated toolchain wanting: $out"
+grep -q '^upgrade .*sunfmin/tap/flux-toolchain' "$work/brew.log" || fail "install does not brew upgrade it: $(cat "$work/brew.log")"
+
+out=$(run newest install)
+grep -q -E '^(install|upgrade)' "$work/brew.log" && fail "install reinstalls the newest: $(cat "$work/brew.log")"
+
+out=$(run outdated)
+case "$out" in *"exit 1") ;; *) fail "a check runs with an outdated flux-toolchain: $out" ;; esac
+case "$out" in *"flux from"*) fail "a check runs with an outdated flux-toolchain: $out" ;; esac
+
+out=$(run newest)
+case "$out" in *"exit 0") ;; *) fail "a check with the newest flux-toolchain fails: $out" ;; esac
+case "$out" in *"flux from cargo"* | *"flux from local"*) fail "a check runs an older cargo-flux ahead of the tap's: $out" ;; esac
+case "$out" in *"flux from tap"*) ;; *) fail "a check does not run the tap's cargo-flux: $out" ;; esac
+
+# Nothing pins, builds or downloads the checker: the tap is its one source.
+if grep -n -E '^\[workspace\.metadata\.checker\]|^(fixpoint|z3|nightly) = ' "$root/Cargo.toml"; then
+  fail "Cargo.toml still pins a checker"
+fi
+if grep -n -E 'cargo xtask install|git clone https://github.com/flux-rs|liquid-fixpoint|Z3Prover|fixpoint --version|z3 --version' "$root/verify.sh"; then
+  fail "verify.sh still pins, builds or downloads a checker"
+fi
 
 [ "$failures" -eq 0 ] || exit 1
+echo "verify-test: ok"

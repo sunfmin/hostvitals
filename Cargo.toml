@@ -9,14 +9,14 @@ license = "MIT"
 repository = "https://github.com/sunfmin/hostvitals"
 
 [workspace.dependencies]
-flux-rs = { git = "https://github.com/flux-rs/flux.git", rev = "b2f3e31e17727ffe08c2efee1e7aa0bc4f0a66f9" }
-flux-core = { git = "https://github.com/flux-rs/flux.git", rev = "b2f3e31e17727ffe08c2efee1e7aa0bc4f0a66f9" }
-flux-alloc = { git = "https://github.com/flux-rs/flux.git", rev = "b2f3e31e17727ffe08c2efee1e7aa0bc4f0a66f9" }
-agent-help = { git = "https://github.com/sunfmin/agent-cli.git", rev = "4988a0dc796515ac6ad88318afa0848224573dee" }
+# The Flux commit that Homebrew's sunfmin/tap/flux-toolchain, the newest the
+# tap has, was built from: `brew info sunfmin/tap/flux-toolchain` names it.
+# ./verify.sh checks with that toolchain; it pins nothing of its own.
+flux-rs = { git = "https://github.com/flux-rs/flux.git", rev = "ef6af17f647cf98c860e18e90c36d1f1b69849ff" }
+flux-core = { git = "https://github.com/flux-rs/flux.git", rev = "ef6af17f647cf98c860e18e90c36d1f1b69849ff" }
+flux-alloc = { git = "https://github.com/flux-rs/flux.git", rev = "ef6af17f647cf98c860e18e90c36d1f1b69849ff" }
+agent-help = { git = "https://github.com/sunfmin/agent-cli.git", rev = "f506df826a97b2fd834e1d65b9057001a6a6e796" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 clap = { version = "4.5", features = ["derive", "env"] }
 
-[workspace.metadata.checker]
-nightly = "nightly-2026-09-25"
-z3 = "5.1.0"

@@ -1,0 +1,16 @@
+Filesystem                                                                                        1024-blocks      Used  Available Capacity  Mounted on
+/dev/disk3s1s1                                                                                      482797652  13759480   47318516    23%    /
+/dev/disk3s6                                                                                        482797652        20   47318516     1%    /System/Volumes/VM
+/dev/disk3s2                                                                                        482797652  18854208   47318516    29%    /System/Volumes/Preboot
+/dev/disk3s4                                                                                        482797652   1164204   47318516     3%    /System/Volumes/Update
+/dev/disk1s2                                                                                           512000      6164     494300     2%    /System/Volumes/xarts
+/dev/disk1s1                                                                                           512000      5988     494300     2%    /System/Volumes/iSCPreboot
+/dev/disk1s3                                                                                           512000       688     494300     1%    /System/Volumes/Hardware
+/dev/disk3s5                                                                                        482797652 398602368   47318516    90%    /System/Volumes/Data
+/dev/disk3s3                                                                                        482797652   2942240   47318516     6%    /Volumes/Recovery
+/dev/disk2s1                                                                                          5242836   2506304    2714828    49%    /System/Volumes/Update/SFR/mnt1
+devices -- file:///Users/someone/Library/Containers/com.apple.CoreDevice.CoreDeviceService/Data/  1073741824         0 1073741824     0%    /Users/someone/Library/Developer/CoreDevice/DeviceFS
+/dev/disk7s1                                                                                         18622464  18074320     500740    98%    /private/var/run/com.apple.security.cryptexd/mnt/com.apple.iPhoneOS.SimulatorRuntime-v24.2.8117.0.J5k2PL
+/dev/disk5s1                                                                                         18124800  17586672     491796    98%    /private/var/run/com.apple.security.cryptexd/mnt/com.apple.iPhoneOS.SimulatorRuntime-v24.1.434.0.EmA4WO
+/dev/disk9s1                                                                                         18649088  18099272     502412    98%    /private/var/run/com.apple.security.cryptexd/mnt/com.apple.iPhoneOS.SimulatorRuntime-v24.2.91016.19.wKnfSa
+/dev/disk3s1                                                                                        482797652  13759480   47318516    23%    /System/Volumes/Update/mnt1

@@ -518,7 +518,9 @@ fn collector_warnings_and_malformed_files_never_become_complete_lists() {
 #[test]
 fn a_mount_lsof_cannot_stat_but_recovers_from_the_mount_table_keeps_the_inventory() {
     // Another user's Xcode CoreDevice devicefs: lsof warns and assumes its
-    // device from the mount table (sunfmin/control#855).
+    // device from the mount table (sunfmin/control#855). A warning with no
+    // "assuming" line keeps the inventory too, as sunfmin/control#852 asks:
+    // the possible gap is stated in `skipped`, naming the mount, not hidden.
     let recovered = "lsof: WARNING: can't stat() devicefs file system /Users/someone/Library/Developer/CoreDevice/DeviceFS\n      Output information may be incomplete.\n      assuming \"dev=30000003\" from mount table\n";
     for (stderr, kept) in [
         (recovered.to_string(), true),
@@ -526,7 +528,7 @@ fn a_mount_lsof_cannot_stat_but_recovers_from_the_mount_table_keeps_the_inventor
         (
             "lsof: WARNING: can't stat() devicefs file system /x\n      Output information may be incomplete.\n"
                 .into(),
-            false,
+            true,
         ),
         (format!("{recovered}lsof: WARNING: can't read kernel memory\n"), false),
     ] {
@@ -540,6 +542,20 @@ fn a_mount_lsof_cannot_stat_but_recovers_from_the_mount_table_keeps_the_inventor
         assert!(out.status.success());
         assert_eq!(a["open_files"].is_array(), kept, "{stderr}: {a}");
         assert_eq!(a["sockets"].is_array(), kept, "{stderr}: {a}");
+        if kept {
+            let mount = if stderr.contains("/x\n") {
+                "/x"
+            } else {
+                "/Users/someone/Library/Developer/CoreDevice/DeviceFS"
+            };
+            assert!(
+                a["skipped"].as_array().unwrap().iter().any(|s| {
+                    s["measurement"] == "cwd,open_files,sockets"
+                        && s["reason"].as_str().unwrap().contains(mount)
+                }),
+                "{stderr}: {a}"
+            );
+        }
     }
 }
 
@@ -614,5 +630,55 @@ fn process_survives_unusable_names_in_the_snapshot() {
         let (out, answer) = lab.run();
         assert!(out.status.success(), "{answer}");
         assert_eq!(answer["name"], expected);
+    }
+}
+
+const UNSTATTED_MOUNT: &str = "lsof: WARNING: can't stat() devicefs file system /Users/other/Library/Developer/CoreDevice/DeviceFS\n      Output information may be incomplete.\n      assuming \"dev=30000003\" from mount table\nlsof: WARNING: can't stat() smbfs file system /Volumes/Shared Drive\n      Output information may be incomplete.\n";
+
+#[test]
+fn unstatted_mount_warnings_keep_the_inventory_and_name_each_mount_as_skipped() {
+    let lab = Lab::new();
+    let mut lsof: Value =
+        serde_json::from_slice(&fs::read(lab.0.join("lsof.json")).unwrap()).unwrap();
+    lsof["stderr"] = json!(UNSTATTED_MOUNT);
+    lab.write("lsof", lsof);
+    let (out, a) = lab.run();
+    assert!(out.status.success(), "{a}");
+    assert_eq!(a["cwd"], "/tmp/work space");
+    assert_eq!(a["open_files"][0]["path"], "/tmp/open file");
+    assert_eq!(a["sockets"].as_array().unwrap().len(), 4, "{a}");
+    let skipped = a["skipped"].as_array().unwrap();
+    let entry = skipped
+        .iter()
+        .find(|s| s["measurement"] == "cwd,open_files,sockets")
+        .unwrap_or_else(|| panic!("{a}"));
+    let reason = entry["reason"].as_str().unwrap();
+    assert!(
+        reason.contains("/Users/other/Library/Developer/CoreDevice/DeviceFS")
+            && reason.contains("/Volumes/Shared Drive"),
+        "{reason}"
+    );
+    assert!(!reason.contains("denied"), "{reason}");
+}
+
+#[test]
+fn any_other_lsof_diagnostic_beside_mount_warnings_still_refuses_the_inventory() {
+    for stderr in [
+        format!("{UNSTATTED_MOUNT}lsof: WARNING: can't examine a file\n"),
+        format!("{UNSTATTED_MOUNT}      something else entirely\n"),
+        "      Output information may be incomplete.\n".to_owned(),
+        "lsof: WARNING: can't stat() devicefs file system \n".to_owned(),
+        "lsof: WARNING: can't stat() file /tmp/x: Permission denied\n".to_owned(),
+    ] {
+        let lab = Lab::new();
+        let mut lsof: Value =
+            serde_json::from_slice(&fs::read(lab.0.join("lsof.json")).unwrap()).unwrap();
+        lsof["stderr"] = json!(stderr);
+        lab.write("lsof", lsof);
+        let (out, a) = lab.run();
+        assert!(out.status.success(), "{a}");
+        for field in ["cwd", "open_files", "sockets"] {
+            assert!(a[field].is_null(), "{field} {stderr:?} {a}");
+        }
     }
 }

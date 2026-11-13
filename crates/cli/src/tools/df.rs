@@ -15,12 +15,26 @@ pub(super) fn args() -> Vec<&'static str> {
     vec!["-a", "-l", "-k", "-P"]
 }
 
-pub fn snapshot() -> Result<Vec<Volume>, String> {
+/// What one df run yields: the volumes of every readable row, and each row
+/// that could not be read, so one odd row never hides the rest.
+pub struct Inventory {
+    pub volumes: Vec<Volume>,
+    pub skipped_rows: Vec<SkippedRow>,
+}
+
+/// A df row left out of the inventory, unreadable or a duplicate, with its mount point when it was read.
+pub struct SkippedRow {
+    pub reason: &'static str,
+    pub mount_point: Option<String>,
+}
+
+/// Fails only when df fails, its header is unrecognized, or no row is readable.
+pub fn snapshot() -> Result<Inventory, String> {
     let text = super::capture(super::Tool::Df, args())?;
     parse(&text).map_err(str::to_owned)
 }
 
-fn parse(text: &str) -> Result<Vec<Volume>, &'static str> {
+fn parse(text: &str) -> Result<Inventory, &'static str> {
     let mut lines = text.lines().filter(|l| !l.trim().is_empty());
     if lines
         .next()
@@ -37,12 +51,25 @@ fn parse(text: &str) -> Result<Vec<Volume>, &'static str> {
     {
         return Err("unrecognized df local-volume header");
     }
-    let mut volumes = Vec::new();
+    let mut inventory = Inventory {
+        volumes: Vec::new(),
+        skipped_rows: Vec::new(),
+    };
     let mut identities = BTreeSet::new();
     for line in lines {
-        let row = row(line).ok_or("unrecognized df volume row")?;
+        let Some(row) = row(line) else {
+            inventory.skipped_rows.push(SkippedRow {
+                reason: "unreadable df volume row: no 1024-blocks, Used, Available and Capacity columns followed by an absolute mount point",
+                mount_point: None,
+            });
+            continue;
+        };
         if !identities.insert((row.filesystem, row.mount_point)) {
-            return Err("invalid or duplicate df mount identity");
+            inventory.skipped_rows.push(SkippedRow {
+                reason: "duplicate df mount identity: the same filesystem and mount point were reported twice",
+                mount_point: Some(row.mount_point.into()),
+            });
+            continue;
         }
         let size_bytes = bytes(row.size);
         let mut free_bytes = bytes(row.available);
@@ -52,7 +79,7 @@ fn parse(text: &str) -> Result<Vec<Volume>, &'static str> {
         {
             free_bytes = None;
         }
-        volumes.push(Volume {
+        inventory.volumes.push(Volume {
             filesystem: row.filesystem.into(),
             mount_point: row.mount_point.into(),
             size_bytes,
@@ -60,10 +87,14 @@ fn parse(text: &str) -> Result<Vec<Volume>, &'static str> {
             free_share: hostvitals_policy::disk::free_share(size_bytes, free_bytes),
         });
     }
-    if volumes.is_empty() {
-        return Err("df returned no mounted local volumes");
+    if inventory.volumes.is_empty() {
+        return Err(if inventory.skipped_rows.is_empty() {
+            "df returned no mounted local volumes"
+        } else {
+            "df returned no readable mounted local volume row"
+        });
     }
-    Ok(volumes)
+    Ok(inventory)
 }
 
 struct Row<'a> {
@@ -127,7 +158,7 @@ mod tests {
     const HEADER: &str = "Filesystem 1024-blocks Used Available Capacity Mounted on\n";
 
     fn only(row: &str) -> Volume {
-        let mut volumes = parse(&format!("{HEADER}{row}\n")).unwrap();
+        let mut volumes = parse(&format!("{HEADER}{row}\n")).unwrap().volumes;
         assert_eq!(volumes.len(), 1);
         volumes.remove(0)
     }
@@ -175,7 +206,9 @@ mod tests {
 
     #[test]
     fn a_captured_report_with_the_coredevice_mount_reads_every_volume() {
-        let volumes = parse(include_str!("../../tests/fixtures/df-coredevice.txt")).unwrap();
+        let volumes = parse(include_str!("../../tests/fixtures/df-coredevice.txt"))
+            .unwrap()
+            .volumes;
         assert_eq!(volumes.len(), 15);
         assert!(volumes.iter().any(|v| v.mount_point == "/"));
         let device = volumes

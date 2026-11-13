@@ -469,8 +469,7 @@ fn malformed_failed_or_missing_volume_reports_are_unknown_not_empty_inventories(
         "",
         "not df",
         "Filesystem 1024-blocks Used Available Capacity Mounted on\n",
-        "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/a 1000 500 500 50% /\ntruncated",
-        "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/a 1000 500 500 50% /\n/dev/a 1000 500 500 50% /\n",
+        "Filesystem 1024-blocks Used Available Capacity Mounted on\ntruncated\n/dev/a 1000 500 500 50% Volumes/relative\n",
     ] {
         let rows = row(1, 501, "0:00.00", 1, "/one");
         let lab = Lab::new(rows.clone(), rows);
@@ -502,6 +501,65 @@ fn malformed_failed_or_missing_volume_reports_are_unknown_not_empty_inventories(
                 .unwrap()
                 .contains("volume inaccessible")
     }));
+}
+
+#[test]
+fn an_unreadable_or_duplicate_df_row_is_skipped_alone_and_every_other_volume_is_reported() {
+    let rows = row(1, 501, "0:00.00", 1, "/one");
+    let lab = Lab::new(rows.clone(), rows);
+    lab.process(1, 1);
+    lab.write("df", json!({"stdout": concat!(
+        "Filesystem 1024-blocks Used Available Capacity Mounted on\n",
+        "/dev/disk3s1s1 1000 500 400 56% /\n",
+        "devices -- file:///Users/someone/Library/Containers/com.apple.CoreDevice.CoreDeviceService/Data/  1073741824  0  1073741824  0%  /Users/someone/Library/Developer/CoreDevice/DeviceFS\n",
+        "garbage without columns\n",
+        "/dev/disk3s5 1000 500 400 56% /System/Volumes/Data\n",
+        "/dev/disk3s5 1000 500 400 56% /System/Volumes/Data\n",
+        "map auto_home 0 0 0 100% /System/Volumes/Data/home\n",
+    )}));
+    let a = lab.answer();
+    let volumes = a["volumes"].as_array().expect("readable rows are reported");
+    let identities: Vec<_> = volumes
+        .iter()
+        .map(|v| {
+            (
+                v["filesystem"].as_str().unwrap(),
+                v["mount_point"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        identities,
+        [
+            ("/dev/disk3s1s1", "/"),
+            (
+                "devices -- file:///Users/someone/Library/Containers/com.apple.CoreDevice.CoreDeviceService/Data/",
+                "/Users/someone/Library/Developer/CoreDevice/DeviceFS"
+            ),
+            ("/dev/disk3s5", "/System/Volumes/Data"),
+            ("map auto_home", "/System/Volumes/Data/home"),
+        ]
+    );
+    assert_eq!(volumes[0]["free_bytes"], 409600);
+    assert_eq!(volumes[1]["size_bytes"], 1099511627776u64);
+    let skipped: Vec<_> = a["skipped"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["measurement"] == "volumes" && s["reason"] != "volume capacity or available bytes unknown, invalid, overflowed or zero capacity; no free-space ratio can be judged")
+        .collect();
+    assert_eq!(skipped.len(), 2, "{skipped:?}");
+    assert_eq!(skipped[0]["count"], 1);
+    assert!(skipped[0].get("mount_point").is_none());
+    assert!(
+        skipped[0]["fix"]
+            .as_str()
+            .unwrap()
+            .contains("df -a -l -k -P")
+    );
+    assert_eq!(skipped[1]["count"], 1);
+    assert_eq!(skipped[1]["mount_point"], "/System/Volumes/Data");
+    assert!(skipped[1]["reason"].as_str().unwrap().contains("duplicate"));
 }
 
 #[test]

@@ -469,8 +469,7 @@ fn malformed_failed_or_missing_volume_reports_are_unknown_not_empty_inventories(
         "",
         "not df",
         "Filesystem 1024-blocks Used Available Capacity Mounted on\n",
-        "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/a 1000 500 500 50% /\ntruncated",
-        "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/a 1000 500 500 50% /\n/dev/a 1000 500 500 50% /\n",
+        "Filesystem 1024-blocks Used Available Capacity Mounted on\ntruncated\n/dev/a 1000 500 500 50% Volumes/relative\n",
     ] {
         let rows = row(1, 501, "0:00.00", 1, "/one");
         let lab = Lab::new(rows.clone(), rows);

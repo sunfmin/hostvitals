@@ -41,7 +41,7 @@ checks:
 
 The fleet cuts its first version, declared by `initial` below, when it goes
 idle without a version tag. After that it cuts a version with landed work
-past the newest `v*` tag (control ADR 0003). It lands the version change
+past the newest `v*` tag ([afkconvoy ADR-0064](https://github.com/sunfmin/afkconvoy/blob/main/docs/adr/0064-the-fleet-cuts-its-own-versions.md)). It lands the version change
 through the train, tags that commit, publishes both Mac archives and the
 generated formula, then upgrades the host's install. These are the release
 steps, the only place their sequence is written. Each block runs under `sh -e`, with the

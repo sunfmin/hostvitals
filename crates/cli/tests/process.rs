@@ -518,7 +518,9 @@ fn collector_warnings_and_malformed_files_never_become_complete_lists() {
 #[test]
 fn a_mount_lsof_cannot_stat_but_recovers_from_the_mount_table_keeps_the_inventory() {
     // Another user's Xcode CoreDevice devicefs: lsof warns and assumes its
-    // device from the mount table (sunfmin/control#855).
+    // device from the mount table (sunfmin/control#855). A warning with no
+    // "assuming" line keeps the inventory too, as sunfmin/control#852 asks:
+    // the possible gap is stated in `skipped`, naming the mount, not hidden.
     let recovered = "lsof: WARNING: can't stat() devicefs file system /Users/someone/Library/Developer/CoreDevice/DeviceFS\n      Output information may be incomplete.\n      assuming \"dev=30000003\" from mount table\n";
     for (stderr, kept) in [
         (recovered.to_string(), true),
@@ -526,7 +528,7 @@ fn a_mount_lsof_cannot_stat_but_recovers_from_the_mount_table_keeps_the_inventor
         (
             "lsof: WARNING: can't stat() devicefs file system /x\n      Output information may be incomplete.\n"
                 .into(),
-            false,
+            true,
         ),
         (format!("{recovered}lsof: WARNING: can't read kernel memory\n"), false),
     ] {
@@ -540,6 +542,20 @@ fn a_mount_lsof_cannot_stat_but_recovers_from_the_mount_table_keeps_the_inventor
         assert!(out.status.success());
         assert_eq!(a["open_files"].is_array(), kept, "{stderr}: {a}");
         assert_eq!(a["sockets"].is_array(), kept, "{stderr}: {a}");
+        if kept {
+            let mount = if stderr.contains("/x\n") {
+                "/x"
+            } else {
+                "/Users/someone/Library/Developer/CoreDevice/DeviceFS"
+            };
+            assert!(
+                a["skipped"].as_array().unwrap().iter().any(|s| {
+                    s["measurement"] == "cwd,open_files,sockets"
+                        && s["reason"].as_str().unwrap().contains(mount)
+                }),
+                "{stderr}: {a}"
+            );
+        }
     }
 }
 

@@ -154,6 +154,17 @@ pub fn answer(source: &Source, pid: u32, seconds: u64) -> Result<Value, String> 
         }
         match tools::lsof::read(pid) {
             Ok(inventory) => {
+                if !inventory.unstatted_mounts.is_empty() {
+                    skip(
+                        &mut skipped,
+                        "cwd,open_files,sockets",
+                        &format!(
+                            "lsof could not stat() mount(s) {:?}; entries on them may be missing from these lists",
+                            inventory.unstatted_mounts
+                        ),
+                        &root_retry,
+                    );
+                }
                 answer["cwd"] = json!(inventory.cwd);
                 if answer["cwd"].is_null() {
                     skip(

@@ -3,18 +3,20 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-# It runs on rustup's nightly, the one cargo-flux is built for,
-# whatever the shell that started it has on its PATH: a Homebrew `cargo` ahead
-# of rustup's breaks when Homebrew moves a library under it. The release
-# builds on stable, where Flux's attributes expand to nothing.
+# It runs on rustup's cargo, on the stable toolchain rust-toolchain.toml names,
+# the one the release builds on, whatever the shell that started it has on its
+# PATH: a Homebrew `cargo` ahead of rustup's breaks when Homebrew moves a
+# library under it. Flux's attributes expand to nothing there; ./verify.sh
+# checks them, with the tap's Flux on the nightly it runs on.
 PATH="$HOME/.cargo/bin:$PATH"
-RUSTUP_TOOLCHAIN=$(sed -n 's/^nightly = "\(.*\)"$/\1/p' Cargo.toml)
-export PATH RUSTUP_TOOLCHAIN
+export PATH
 
 cargo fmt --all --check
 
 # The gate's reading of Flux's summaries is itself tested.
 ./flux-summary-test.sh >/dev/null
+# So is its choice of checker.
+./verify-test.sh >/dev/null
 
 # Flux runs first, alone: beside the tests it shares the cores, and its time
 # measures them. A solver query past twenty seconds fails naming its function

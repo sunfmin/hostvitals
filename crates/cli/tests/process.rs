@@ -588,3 +588,53 @@ fn process_survives_unusable_names_in_the_snapshot() {
         assert_eq!(answer["name"], expected);
     }
 }
+
+const UNSTATTED_MOUNT: &str = "lsof: WARNING: can't stat() devicefs file system /Users/other/Library/Developer/CoreDevice/DeviceFS\n      Output information may be incomplete.\n      assuming \"dev=30000003\" from mount table\nlsof: WARNING: can't stat() smbfs file system /Volumes/Shared Drive\n      Output information may be incomplete.\n";
+
+#[test]
+fn unstatted_mount_warnings_keep_the_inventory_and_name_each_mount_as_skipped() {
+    let lab = Lab::new();
+    let mut lsof: Value =
+        serde_json::from_slice(&fs::read(lab.0.join("lsof.json")).unwrap()).unwrap();
+    lsof["stderr"] = json!(UNSTATTED_MOUNT);
+    lab.write("lsof", lsof);
+    let (out, a) = lab.run();
+    assert!(out.status.success(), "{a}");
+    assert_eq!(a["cwd"], "/tmp/work space");
+    assert_eq!(a["open_files"][0]["path"], "/tmp/open file");
+    assert_eq!(a["sockets"].as_array().unwrap().len(), 4, "{a}");
+    let skipped = a["skipped"].as_array().unwrap();
+    let entry = skipped
+        .iter()
+        .find(|s| s["measurement"] == "cwd,open_files,sockets")
+        .unwrap_or_else(|| panic!("{a}"));
+    let reason = entry["reason"].as_str().unwrap();
+    assert!(
+        reason.contains("/Users/other/Library/Developer/CoreDevice/DeviceFS")
+            && reason.contains("/Volumes/Shared Drive"),
+        "{reason}"
+    );
+    assert!(!reason.contains("denied"), "{reason}");
+}
+
+#[test]
+fn any_other_lsof_diagnostic_beside_mount_warnings_still_refuses_the_inventory() {
+    for stderr in [
+        format!("{UNSTATTED_MOUNT}lsof: WARNING: can't examine a file\n"),
+        format!("{UNSTATTED_MOUNT}      something else entirely\n"),
+        "      Output information may be incomplete.\n".to_owned(),
+        "lsof: WARNING: can't stat() devicefs file system \n".to_owned(),
+        "lsof: WARNING: can't stat() file /tmp/x: Permission denied\n".to_owned(),
+    ] {
+        let lab = Lab::new();
+        let mut lsof: Value =
+            serde_json::from_slice(&fs::read(lab.0.join("lsof.json")).unwrap()).unwrap();
+        lsof["stderr"] = json!(stderr);
+        lab.write("lsof", lsof);
+        let (out, a) = lab.run();
+        assert!(out.status.success(), "{a}");
+        for field in ["cwd", "open_files", "sockets"] {
+            assert!(a[field].is_null(), "{field} {stderr:?} {a}");
+        }
+    }
+}

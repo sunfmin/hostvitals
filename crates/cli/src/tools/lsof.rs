@@ -10,9 +10,6 @@ pub fn read(pid: u32) -> Result<hostvitals_policy::files::Inventory, String> {
         super::MEASUREMENT_LIMIT_MIB * 1024 * 1024,
         std::time::Duration::from_secs(super::MEASUREMENT_TIMEOUT_SECONDS),
     )?;
-    if !output.stderr.trim().is_empty() {
-        return Err("lsof reported diagnostics; file inventory may be incomplete".into());
-    }
     let text = String::from_utf8(output.stdout).map_err(|_| "lsof report is not UTF-8")?;
-    hostvitals_policy::files::parse(&text, pid).map_err(str::to_owned)
+    hostvitals_policy::files::parse(&text, &output.stderr, pid).map_err(str::to_owned)
 }

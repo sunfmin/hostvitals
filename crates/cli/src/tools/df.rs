@@ -40,20 +40,12 @@ fn parse(text: &str) -> Result<Vec<Volume>, &'static str> {
     let mut volumes = Vec::new();
     let mut identities = BTreeSet::new();
     for line in lines {
-        let mut rest = line.trim_start();
-        let mut fields = Vec::new();
-        for _ in 0..5 {
-            let end = rest
-                .find(char::is_whitespace)
-                .ok_or("truncated df volume row")?;
-            fields.push(&rest[..end]);
-            rest = rest[end..].trim_start();
-        }
-        if !rest.starts_with('/') || !identities.insert((fields[0], rest)) {
+        let (filesystem, counts, mount_point) = row(line)?;
+        if !identities.insert((filesystem, mount_point)) {
             return Err("invalid or duplicate df mount identity");
         }
-        let size_bytes = bytes(fields[1]);
-        let mut free_bytes = bytes(fields[3]);
+        let size_bytes = bytes(counts[0]);
+        let mut free_bytes = bytes(counts[2]);
         if size_bytes
             .zip(free_bytes)
             .is_some_and(|(size, free)| free > size)
@@ -61,8 +53,8 @@ fn parse(text: &str) -> Result<Vec<Volume>, &'static str> {
             free_bytes = None;
         }
         volumes.push(Volume {
-            filesystem: fields[0].into(),
-            mount_point: rest.into(),
+            filesystem: filesystem.into(),
+            mount_point: mount_point.into(),
             size_bytes,
             free_bytes,
             free_share: hostvitals_policy::disk::free_share(size_bytes, free_bytes),
@@ -72,6 +64,38 @@ fn parse(text: &str) -> Result<Vec<Volume>, &'static str> {
         return Err("df returned no mounted local volumes");
     }
     Ok(volumes)
+}
+
+/// Splits a `df -P` row into its filesystem, its blocks, used and available
+/// counts, and its mount point. Both the filesystem and the mount point may
+/// hold spaces (CoreDevice mounts `devices -- file:///…`, a volume named
+/// `/Volumes/low space`), so the row is split where the first run of three
+/// counts and a capacity is followed by an absolute mount point.
+fn row(line: &str) -> Result<(&str, [&str; 3], &str), &'static str> {
+    let words: Vec<(usize, &str)> = line
+        .split_whitespace()
+        .map(|w| (w.as_ptr() as usize - line.as_ptr() as usize, w))
+        .collect();
+    if words.len() < 6 {
+        return Err("truncated df volume row");
+    }
+    let count = |w: &str| w == "-" || (!w.is_empty() && w.bytes().all(|b| b.is_ascii_digit()));
+    let capacity = |w: &str| w == "-" || count(w.strip_suffix('%').unwrap_or(w));
+    (1..words.len() - 4)
+        .find(|&i| {
+            words[i..i + 3].iter().all(|(_, w)| count(w))
+                && capacity(words[i + 3].1)
+                && words[i + 4].1.starts_with('/')
+        })
+        .map(|i| {
+            let (last, word) = words[i - 1];
+            (
+                &line[words[0].0..last + word.len()],
+                [words[i].1, words[i + 1].1, words[i + 2].1],
+                &line[words[i + 4].0..],
+            )
+        })
+        .ok_or("invalid or duplicate df mount identity")
 }
 
 fn bytes(text: &str) -> Option<u64> {

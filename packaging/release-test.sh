@@ -29,13 +29,14 @@ run() { "$repo/packaging/release.sh" "$@"; }
 refuses() {
     if run "$@" >"$scratch/output" 2>&1; then fail "accepted $*"; fi
 }
+# Where rustup's cargo builds: its target directory, CARGO_TARGET_DIR's when set.
 binary() {
-    destination=$1
+    destination=${CARGO_TARGET_DIR:-$repo/target}/$1/release
     architecture=$2
     release=$3
-    mkdir -p "$repo/target/$destination/release"
+    mkdir -p "$destination"
     printf '#include <stdio.h>\nint main(void) { puts("hostvitals %s"); return 0; }\n' "$release" >"$scratch/main.c"
-    clang -arch "$architecture" "$scratch/main.c" -o "$repo/target/$destination/release/hostvitals"
+    clang -arch "$architecture" "$scratch/main.c" -o "$destination/hostvitals"
 }
 binaries() {
     binary aarch64-apple-darwin arm64 "$v"
@@ -122,9 +123,12 @@ target) printf 'aarch64-apple-darwin\n'; [ "${RELEASE_TEST_NO_INTEL:-}" = yes ] 
 *) exit 2 ;;
 esac
 SH
+    # Like huacnlee/cargo, it ignores CARGO_TARGET_DIR, builds into ./target
+    # and says so in what it reports.
     cat >"$scratch/tools/cargo" <<'SH'
 #!/bin/sh
 set -eu
+unset CARGO_TARGET_DIR
 if [ "$1" != build ]; then exec "$RELEASE_TEST_CARGO" "$@"; fi
 [ "$RUSTUP_TOOLCHAIN" = stable ] || exit 1
 printf '%s\n' "$*" >>"$RELEASE_TEST_CALLS"
@@ -136,7 +140,7 @@ printf '#include <stdio.h>\nint main(void) { puts("hostvitals %s"); return 0; }\
     clang -arch "$architecture" -x c - -o "target/$target/release/hostvitals"
 SH
     chmod +x "$scratch/tools/"*
-    export PATH="$scratch/tools:$PATH"
+    export PATH="$scratch/tools:$PATH" CARGO_TARGET_DIR="$scratch/ignored-target"
     export RELEASE_TEST_NO_INTEL=yes
     refuses doctor
     grep -q 'rustup target add --toolchain stable x86_64-apple-darwin' "$scratch/output"
@@ -150,6 +154,7 @@ SH
         grep -q "build --release --locked -p hostvitals --target $target" "$scratch/calls"
     done
     run package >/dev/null
+    [ ! -e "$CARGO_TARGET_DIR" ] || fail 'the fixture cargo honoured CARGO_TARGET_DIR'
     echo 'release test: build passed'
     ;;
 formula)
@@ -230,6 +235,12 @@ package)
     (cd "$repo/dist" && shasum -a 256 -c SHA256SUMS)
     DIST="$scratch/archives with spaces" run package >/dev/null
     (cd "$scratch/archives with spaces" && shasum -a 256 -c SHA256SUMS)
+    # rustup's cargo builds in CARGO_TARGET_DIR; ./target's binaries are not it.
+    export CARGO_TARGET_DIR="$scratch/configured-target"
+    refuses package
+    grep -q "$CARGO_TARGET_DIR/aarch64-apple-darwin/release/hostvitals is missing" "$scratch/output" || fail "package did not look in CARGO_TARGET_DIR: $(cat "$scratch/output")"
+    binaries
+    run package >/dev/null
     echo 'release test: package passed'
     ;;
 check)

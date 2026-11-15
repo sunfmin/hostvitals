@@ -13,7 +13,9 @@
 #   tap              generate and push Formula/hostvitals.rb to sunfmin/tap
 #   publish          release, then tap; safe to retry after a partial failure
 #
-# DIST and CARGO_TARGET_DIR override dist/ and target/. Nothing is installed.
+# DIST overrides dist/. Binaries are read from the target directory cargo
+# metadata reports, whatever sets it: huacnlee/cargo ignores CARGO_TARGET_DIR.
+# Nothing is installed.
 set -eu
 cd "$(dirname "$0")/.."
 ROOT=$PWD
@@ -24,7 +26,6 @@ REPO=sunfmin/hostvitals
 TAP=sunfmin/homebrew-tap
 ARCHES="arm64 x86_64"
 DIST=${DIST:-dist}
-TARGET_DIR=${CARGO_TARGET_DIR:-target}
 
 # Pin both cargo and the rustc it launches to rustup's stable toolchain.
 stable() {
@@ -60,13 +61,26 @@ target() {
     esac
 }
 
+# Where cargo builds a target's release binary, as cargo itself reports it.
+built() {
+    command -v jq >/dev/null || {
+        echo "release: jq reads cargo metadata and is missing: brew install jq" >&2
+        exit 1
+    }
+    target_directory=$(cargo metadata --manifest-path "$ROOT/Cargo.toml" --format-version 1 --no-deps --offline --locked 2>/dev/null | jq -er .target_directory) || {
+        echo "release: cargo metadata reports no target directory: cargo metadata --format-version 1 --no-deps" >&2
+        exit 1
+    }
+    echo "$target_directory/$(target "$1")/release/$NAME"
+}
+
 archive() {
     echo "$NAME-$(version)-macos-$1.tar.gz"
 }
 
 # Both must pass before either archive is created. No version check is skipped.
 check_binary() {
-    built=$TARGET_DIR/$(target "$1")/release/$NAME
+    built=$(built "$1")
     if [ ! -f "$built" ]; then
         echo "release: $built is missing: packaging/release.sh build" >&2
         exit 1
@@ -167,7 +181,7 @@ package)
     for architecture in $ARCHES; do check_binary "$architecture"; done
     mkdir -p "$DIST"
     for architecture in $ARCHES; do
-        built=$TARGET_DIR/$(target "$architecture")/release/$NAME
+        built=$(built "$architecture")
         COPYFILE_DISABLE=1 tar -czf "$DIST/$(archive "$architecture")" --no-xattrs -C "$(dirname "$built")" "$NAME"
         echo "$DIST/$(archive "$architecture")"
     done

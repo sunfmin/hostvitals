@@ -6,6 +6,8 @@ The cause was Studio64 on 2026-11-15, 11:17–11:40 JST ([sunfmin/control#1083](
 
 `ps` stays the process table's source (ADR-0002): it is setuid root, and a third-party binary's libproc task information fails for root Processes such as fseventsd, so a libproc table would lose the very Processes ADR-0008 was made for. libproc's `proc_listallpids`, which lists every pid in milliseconds without root, only counts them: `hostvitals doctor`'s `ps` check reads the whole table, times it, and when it takes `NOW_COLLECTION_SECONDS` or more names the time and that count. Its fix lists the users with the most Processes and reruns the doctor, because root does not make ps faster; what works is stopping what crowds the host.
 
+A fixture directory may give its own allowance in `now-collection-seconds.json`. The bound applies to CLI stand-ins too, and on Studio64 at a load of 130–150 a stand-in started too slowly for a logic test's 6-second bound, so that test saw the bound instead of the logic it checks. The Lab widens the allowance; the tests of the bound itself keep the real one. A read stopped at the bound names the allowance it was given.
+
 ## Considered options
 
 - **A ps bound that scales with the process count.** It keeps the table on a crowded host, but the whole answer then has no bound, and a caller waiting on the machine-wide readings waits on ps. Rejected.

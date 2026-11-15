@@ -56,6 +56,11 @@ impl Lab {
         lab.write("pmset",json!({"stdout_readings":["Now drawing from 'AC Power'\n","Note: No CPU power status has been recorded\n"]}));
         lab.write("powermetrics",json!({"calls":[],"stdout":format!("*** Sampled system activity (1000.00ms elapsed) ***\nName ID CPU ms/s User% GPU ms/s\n{gpu_rows}\n")}));
         lab.write("now-power",json!({"status":"available","data":{"window_seconds":1.0,"energy":[{"name":"CPU Energy","unit":"mJ","value":0},{"name":"GPU Energy","unit":"mJ","value":0},{"name":"ANE Energy","unit":"mJ","value":0}],"gpu_states":[["OFF",100]]}}));
+        // Stand-ins on a loaded test host start slowly; only the bound's own tests keep the real allowance.
+        lab.write(
+            "now-collection-seconds",
+            json!({"status":"available","data":60}),
+        );
         lab.write("ps", json!({"stdout_readings":[before,after]}));
         lab.write("nettop", json!({"stdout":",bytes_in,bytes_out,\n"}));
         lab.write(
@@ -70,6 +75,10 @@ impl Lab {
             lab.write(&format!("now-host-{i}"), json!({"status":"available","data":{"euid":501,"cpu_ticks":ticks,"logical_cores":8,"physical_cores":4,"load_average":[2.0,3.0,4.0],"memory":{"total_bytes":51539607552u64,"free_percent":12,"pressure_level":{"status":"available","data":2},"swap_used_bytes":8568459428u64,"swap_total_bytes":9663676416u64,"compressed_bytes":3221225472u64}}}));
         }
         lab
+    }
+    /// Restores `now`'s own allowance of `--seconds` plus NOW_COLLECTION_SECONDS.
+    fn real_bound(&self) {
+        fs::remove_file(self.0.join("now-collection-seconds.json")).unwrap();
     }
     fn write(&self, name: &str, value: Value) {
         fs::write(self.0.join(format!("{name}.json")), value.to_string()).unwrap();
@@ -2314,6 +2323,7 @@ fn a_crowded_process_table_still_answers_machine_wide_readings_within_the_bound(
         .map(|pid| row(pid, 501, "0:00.00", 1, "/launchd_sim"))
         .collect();
     let lab = Lab::new(rows.clone(), rows.clone());
+    lab.real_bound();
     lab.write(
         "ps",
         json!({"delay_ms":12000,"stdout_readings":[rows.clone(), rows]}),
@@ -2360,4 +2370,42 @@ fn a_crowded_process_table_still_answers_machine_wide_readings_within_the_bound(
     let fix = skipped["fix"].as_str().unwrap();
     assert!(fix.contains("hostvitals doctor"), "{fix}");
     assert!(!fix.contains("sudo"), "{fix}");
+}
+
+#[test]
+fn a_fixture_directory_widens_the_bound_so_slow_stand_ins_are_still_read() {
+    // A loaded test host starts stand-ins slowly; logic tests must not depend on its speed.
+    let rows = row(1, 501, "0:00.00", 1, "/one");
+    let lab = Lab::new(rows.clone(), rows.clone());
+    lab.process(1, 1);
+    lab.write(
+        "ps",
+        json!({"delay_ms":7000,"stdout_readings":[rows.clone(), rows]}),
+    );
+    let a = lab.answer();
+    assert_eq!(a["processes"][0]["pid"], 1, "{}", a["skipped"]);
+    assert!(
+        a["skipped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|s| s["measurement"] != "processes")
+    );
+}
+
+#[test]
+fn a_read_stopped_at_the_bound_names_the_allowance_it_was_given() {
+    let rows = row(1, 501, "0:00.00", 1, "/one");
+    let lab = Lab::new(rows.clone(), rows.clone());
+    lab.write(
+        "now-collection-seconds",
+        json!({"status":"available","data":2}),
+    );
+    lab.write(
+        "ps",
+        json!({"delay_ms":5000,"stdout_readings":[rows.clone(), rows]}),
+    );
+    let a = lab.answer();
+    let reason = skip(&a, "processes")["reason"].as_str().unwrap().to_owned();
+    assert!(reason.contains("--seconds plus 2 seconds"), "{reason}");
 }

@@ -143,12 +143,15 @@ pub const PROBE_TIMEOUT_SECONDS: u64 = 8;
 /// Time `now` allows past its Window for every read to finish, so the whole answer comes within `--seconds` plus this.
 pub const NOW_COLLECTION_SECONDS: u64 = 5;
 
-/// The instant by which this invocation must answer; every later read is stopped there.
-static ANSWER_BY: OnceLock<Instant> = OnceLock::new();
+/// The instant by which this invocation must answer, with the allowance past the Window it was given; every later read is stopped there.
+static ANSWER_BY: OnceLock<(Instant, u64)> = OnceLock::new();
 
-/// Bounds every read for the rest of this invocation to `deadline`, so no one read can spend the whole answer's time.
-pub(crate) fn answer_by(deadline: Instant) {
-    let _ = ANSWER_BY.set(deadline);
+/// Bounds every read for the rest of this invocation to `seconds` plus `allowance` from now, so no one read can spend the whole answer's time.
+pub(crate) fn answer_by(seconds: u64, allowance: u64) {
+    let _ = ANSWER_BY.set((
+        Instant::now() + Duration::from_secs(seconds.saturating_add(allowance)),
+        allowance,
+    ));
 }
 
 /// Bounds execution and diagnostics, retaining snapshot output only when requested.
@@ -184,17 +187,19 @@ struct Captured {
 
 fn execute(command: &mut Command, limit: usize, timeout: Duration) -> Result<Captured, String> {
     // A read cut short by the answer's deadline says so, rather than claiming its own limit passed.
-    let remaining = ANSWER_BY
+    let bound = ANSWER_BY
         .get()
-        .map(|deadline| deadline.saturating_duration_since(Instant::now()))
-        .filter(|remaining| *remaining < timeout);
-    let at_bound = remaining.is_some();
-    let timeout = remaining.unwrap_or(timeout);
-    let expired = || {
-        if at_bound {
-            format!(
-                "read stopped at this answer's bound of --seconds plus {NOW_COLLECTION_SECONDS} seconds"
+        .map(|(deadline, allowance)| {
+            (
+                deadline.saturating_duration_since(Instant::now()),
+                *allowance,
             )
+        })
+        .filter(|(remaining, _)| *remaining < timeout);
+    let timeout = bound.map_or(timeout, |(remaining, _)| remaining);
+    let expired = || {
+        if let Some((_, allowance)) = bound {
+            format!("read stopped at this answer's bound of --seconds plus {allowance} seconds")
         } else {
             format!("read exceeded {} seconds", timeout.as_secs_f64())
         }

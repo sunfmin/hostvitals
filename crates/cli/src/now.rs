@@ -147,12 +147,21 @@ fn machine() -> Machine {
     }
 }
 
+/// [`NOW_COLLECTION_SECONDS`], or the allowance a fixture directory gives in `now-collection-seconds`,
+/// so stand-ins started slowly on a loaded test host are not stopped where a real read would not be.
+fn collection_seconds(source: &Source) -> u64 {
+    match source.read("now-collection-seconds", || Reading::Available {
+        data: NOW_COLLECTION_SECONDS,
+    }) {
+        Reading::Available { data } => data,
+        Reading::Unavailable { .. } => NOW_COLLECTION_SECONDS,
+    }
+}
+
 /// Answers within `seconds` plus [`NOW_COLLECTION_SECONDS`]: a process table that cannot be
 /// read by then leaves only the per-process part missing.
 pub fn answer(source: &Source, seconds: NonZeroU64, top: NonZeroUsize) -> Result<Answer, String> {
-    crate::tools::answer_by(
-        Instant::now() + Duration::from_secs(seconds.get().saturating_add(NOW_COLLECTION_SECONDS)),
-    );
+    crate::tools::answer_by(seconds.get(), collection_seconds(source));
     std::thread::scope(|scope| {
         let host_before = host(source, 0)?;
         let euid = host_before.euid;

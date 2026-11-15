@@ -2407,3 +2407,46 @@ fn a_read_stopped_at_the_bound_names_the_allowance_it_was_given() {
     let reason = skip(&a, "processes")["reason"].as_str().unwrap().to_owned();
     assert!(reason.contains("--seconds plus 2 seconds"), "{reason}");
 }
+
+#[test]
+fn slow_window_snapshots_never_push_the_answer_past_its_bound() {
+    // sunfmin/control#1083, on the Hub at load 220-550: nettop's first snapshot took 5 s and
+    // the whole Window was slept after it, so `now --seconds 3` answered in 9-10 s.
+    let rows = row(1, 501, "0:00.00", 1, "/one");
+    let lab = Lab::new(rows.clone(), rows);
+    lab.process(1, 1);
+    lab.real_bound();
+    lab.write(
+        "nettop",
+        json!({"delay_ms":5000,"stdout":",bytes_in,bytes_out,\n"}),
+    );
+    lab.write(
+        "ioreg",
+        json!({"delay_ms":1000,"stdout":registry(&[(1, Some(100), Some(200))])}),
+    );
+    let start = std::time::Instant::now();
+    let out = lab.run(&["now", "--seconds", "3", "--top", "2"]);
+    let elapsed = start.elapsed();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(3 + 5),
+        "now took {elapsed:?}"
+    );
+    let a: Value = serde_json::from_slice(&out.stdout).unwrap();
+    // The disk Window ran beside nettop's, so it still closed in time.
+    assert!(
+        a["host"]["disk"]["window_seconds"]
+            .as_f64()
+            .is_some_and(|s| s >= 3.0),
+        "{a}"
+    );
+    // The network Window could not close before the bound: skipped, never shortened.
+    assert!(a["host"]["network"]["window_seconds"].is_null(), "{a}");
+    let reason = skip(&a, "network")["reason"].as_str().unwrap().to_owned();
+    assert!(reason.contains("bound"), "{reason}");
+    assert_eq!(a["processes"][0]["pid"], 1, "{}", a["skipped"]);
+}

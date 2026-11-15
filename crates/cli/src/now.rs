@@ -147,6 +147,25 @@ fn machine() -> Machine {
     }
 }
 
+/// Two snapshots of a counter `seconds` apart, and the seconds actually between them. A Window
+/// that cannot close before the answer's bound fails its closing snapshot, never shortening itself.
+fn counter_window<T>(
+    seconds: NonZeroU64,
+    tool: &str,
+    snapshot: impl Fn() -> Result<T, String>,
+) -> (Result<T, String>, Result<T, String>, f64) {
+    let before = snapshot();
+    let start = Instant::now();
+    let after = crate::tools::wait_within_bound(Duration::from_secs(seconds.get()))
+        .map_err(|reason| format!("{tool}: {reason}"))
+        .and_then(|()| snapshot());
+    (before, after, start.elapsed().as_secs_f64())
+}
+
+fn failed_window<T>(reason: &str) -> (Result<T, String>, Result<T, String>, f64) {
+    (Err(reason.into()), Err(reason.into()), 0.0)
+}
+
 /// [`NOW_COLLECTION_SECONDS`], or the allowance a fixture directory gives in `now-collection-seconds`,
 /// so stand-ins started slowly on a loaded test host are not stopped where a real read would not be.
 fn collection_seconds(source: &Source) -> u64 {
@@ -178,15 +197,13 @@ pub fn answer(source: &Source, seconds: NonZeroU64, top: NonZeroUsize) -> Result
         } else {
             None
         };
-        let network_before = nettop::snapshot();
-        let network_start = Instant::now();
-        let disk_before = ioreg::snapshot();
-        let disk_start = Instant::now();
-        std::thread::sleep(Duration::from_secs(seconds.get()));
-        let disk_after = ioreg::snapshot();
-        let disk_seconds = disk_start.elapsed().as_secs_f64();
-        let network_after = nettop::snapshot();
-        let network_seconds = network_start.elapsed().as_secs_f64();
+        // Each counter Window runs on its own, so one slow snapshot delays no other.
+        let network_worker =
+            scope.spawn(move || counter_window(seconds, "nettop", nettop::snapshot));
+        let disk_worker = scope.spawn(move || counter_window(seconds, "ioreg", ioreg::snapshot));
+        // The CPU Window is the measured time between the two host readings, so a wait the bound
+        // refuses only shortens it.
+        let _ = crate::tools::wait_within_bound(Duration::from_secs(seconds.get()));
         let host_after = host(source, 1)?;
         let power_reading = source.read("now-power", || match power_window {
             Some(Ok(window)) => window.finish(),
@@ -198,6 +215,12 @@ pub fn answer(source: &Source, seconds: NonZeroU64, top: NonZeroUsize) -> Result
             .join()
             .unwrap_or_else(|_| Err("process table reader failed".into()))
             .and_then(|before| Ok((before, table(source, host_after.euid, false)?)));
+        let (network_before, network_after, network_seconds) = network_worker
+            .join()
+            .unwrap_or_else(|_| failed_window("network reader failed"));
+        let (disk_before, disk_after, disk_seconds) = disk_worker
+            .join()
+            .unwrap_or_else(|_| failed_window("disk reader failed"));
         let mut skipped = Vec::new();
         // The Window between the two process tables, present only when both were read.
         let (before, after, usage_before, usage_after, table_window) = match tables {

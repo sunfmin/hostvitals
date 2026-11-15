@@ -143,15 +143,44 @@ pub const PROBE_TIMEOUT_SECONDS: u64 = 8;
 /// Time `now` allows past its Window for every read to finish, so the whole answer comes within `--seconds` plus this.
 pub const NOW_COLLECTION_SECONDS: u64 = 5;
 
+/// Time kept after the last read is stopped, to stop it and write the answer: on Studio64 at a
+/// load of 190-390 with no idle CPU that took 0.13-0.31 s (sunfmin/control#1083).
+pub const NOW_FINISH_MILLISECONDS: u64 = 500;
+
 /// The instant by which this invocation must answer, with the allowance past the Window it was given; every later read is stopped there.
 static ANSWER_BY: OnceLock<(Instant, u64)> = OnceLock::new();
 
-/// Bounds every read for the rest of this invocation to `seconds` plus `allowance` from now, so no one read can spend the whole answer's time.
+/// Bounds every read for the rest of this invocation to `seconds` plus `allowance` from this
+/// process's start, so no one read can spend the whole answer's time and a caller's clock, which
+/// also counts a slow start on a crowded host, agrees with the bound.
 pub(crate) fn answer_by(seconds: u64, allowance: u64) {
+    let bound = Duration::from_secs(seconds.saturating_add(allowance))
+        .saturating_sub(Duration::from_millis(NOW_FINISH_MILLISECONDS));
+    let age = crate::direct::libproc::own_age().unwrap_or_default();
+    let now = Instant::now();
     let _ = ANSWER_BY.set((
-        Instant::now() + Duration::from_secs(seconds.saturating_add(allowance)),
+        now.checked_add(bound.saturating_sub(age)).unwrap_or(now),
         allowance,
     ));
+}
+
+/// Waits `duration`, or fails at once with the bound's reason when the answer's bound comes first.
+pub(crate) fn wait_within_bound(duration: Duration) -> Result<(), String> {
+    match ANSWER_BY.get() {
+        Some((deadline, allowance))
+            if deadline.saturating_duration_since(Instant::now()) < duration =>
+        {
+            Err(stopped_at_bound(*allowance))
+        }
+        _ => {
+            thread::sleep(duration);
+            Ok(())
+        }
+    }
+}
+
+fn stopped_at_bound(allowance: u64) -> String {
+    format!("read stopped at this answer's bound of --seconds plus {allowance} seconds")
 }
 
 /// Bounds execution and diagnostics, retaining snapshot output only when requested.
@@ -199,7 +228,7 @@ fn execute(command: &mut Command, limit: usize, timeout: Duration) -> Result<Cap
     let timeout = bound.map_or(timeout, |(remaining, _)| remaining);
     let expired = || {
         if let Some((_, allowance)) = bound {
-            format!("read stopped at this answer's bound of --seconds plus {allowance} seconds")
+            stopped_at_bound(allowance)
         } else {
             format!("read exceeded {} seconds", timeout.as_secs_f64())
         }

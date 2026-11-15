@@ -74,7 +74,7 @@ pub(crate) enum Command {
     ///
     /// Run `hostvitals now --seconds 3 --top 10`. Reads two all-user `ps` and `nettop` snapshots, two structured `ioreg` block-storage inventories, one `ioreg` accelerator inventory, `notifyutil -g {const:THERMAL_PRESSURE_KEY}`, cumulative host CPU ticks, memory sysctls, process responsibility, two accessible rusage readings, and `df -a -l -k -P` for every mounted local volume. Only reads; saves nothing. `--seconds` and `--top` require a whole number at least 1. Refusals name the corrected command. Missing or malformed host snapshots refuse with a retry line; optional native, disk, volume, network, memory pressure, thermal and GPU reads are null with a `skipped` entry. Memory pressure, thermal pressure and GPU utilization need no root.
     ///
-    /// Answers within `--seconds` plus {const:NOW_COLLECTION_SECONDS} seconds, however crowded the host: every CLI read is stopped at that bound, and the first process table is read beside the Window rather than before it. A process table that ps cannot list by then, or that is missing or malformed, leaves `processes`, `apps`, `window_seconds` and every Ranking in `rankings` null with one `processes` skipped entry naming why and `hostvitals doctor && hostvitals now`; host CPU, memory, pressure, swap, disk, network, power, thermal, GPU and volumes are still answered, with their host Findings, and the command exits zero. Doctor's `ps` check times that read and counts the Processes.
+    /// Answers within `--seconds` plus {const:NOW_COLLECTION_SECONDS} seconds of its own start, however crowded the host: every CLI read is stopped {const:NOW_FINISH_MILLISECONDS} ms before that bound, the first process table is read beside the Window rather than before it, and the network and disk Windows each run beside the others. A Window that cannot close before the bound is skipped with the bound as its reason, never shortened. A process table that ps cannot list by then, or that is missing or malformed, leaves `processes`, `apps`, `window_seconds` and every Ranking in `rankings` null with one `processes` skipped entry naming why and `hostvitals doctor && hostvitals now`; host CPU, memory, pressure, swap, disk, network, power, thermal, GPU and volumes are still answered, with their host Findings, and the command exits zero. Doctor's `ps` check times that read and counts the Processes.
     ///
     /// Answers `findings` before the raw sections. Other keys are `source` (`host` or `fixtures`), `window_seconds` (actual monotonic time between process readings), `host`, `processes` (the entire final snapshot), `apps` (totals of those processes), `volumes`, `rankings` and `skipped`. Host CPU covers the same window with minor snapshot collection skew. CPU percentages for processes and Apps use one logical core as 100%, so multithreaded work can exceed 100%. Host percentages cover all cores and total 100%.
     ///
@@ -224,6 +224,10 @@ pub(crate) fn manual() -> Help {
         .constant(
             "NOW_COLLECTION_SECONDS",
             crate::tools::NOW_COLLECTION_SECONDS,
+        )
+        .constant(
+            "NOW_FINISH_MILLISECONDS",
+            crate::tools::NOW_FINISH_MILLISECONDS,
         )
         .constant(
             "MEASUREMENT_TIMEOUT_SECONDS",

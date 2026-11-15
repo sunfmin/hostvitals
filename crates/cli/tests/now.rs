@@ -56,6 +56,11 @@ impl Lab {
         lab.write("pmset",json!({"stdout_readings":["Now drawing from 'AC Power'\n","Note: No CPU power status has been recorded\n"]}));
         lab.write("powermetrics",json!({"calls":[],"stdout":format!("*** Sampled system activity (1000.00ms elapsed) ***\nName ID CPU ms/s User% GPU ms/s\n{gpu_rows}\n")}));
         lab.write("now-power",json!({"status":"available","data":{"window_seconds":1.0,"energy":[{"name":"CPU Energy","unit":"mJ","value":0},{"name":"GPU Energy","unit":"mJ","value":0},{"name":"ANE Energy","unit":"mJ","value":0}],"gpu_states":[["OFF",100]]}}));
+        // Stand-ins on a loaded test host start slowly; only the bound's own tests keep the real allowance.
+        lab.write(
+            "now-collection-seconds",
+            json!({"status":"available","data":60}),
+        );
         lab.write("ps", json!({"stdout_readings":[before,after]}));
         lab.write("nettop", json!({"stdout":",bytes_in,bytes_out,\n"}));
         lab.write(
@@ -70,6 +75,10 @@ impl Lab {
             lab.write(&format!("now-host-{i}"), json!({"status":"available","data":{"euid":501,"cpu_ticks":ticks,"logical_cores":8,"physical_cores":4,"load_average":[2.0,3.0,4.0],"memory":{"total_bytes":51539607552u64,"free_percent":12,"pressure_level":{"status":"available","data":2},"swap_used_bytes":8568459428u64,"swap_total_bytes":9663676416u64,"compressed_bytes":3221225472u64}}}));
         }
         lab
+    }
+    /// Restores `now`'s own allowance of `--seconds` plus NOW_COLLECTION_SECONDS.
+    fn real_bound(&self) {
+        fs::remove_file(self.0.join("now-collection-seconds.json")).unwrap();
     }
     fn write(&self, name: &str, value: Value) {
         fs::write(self.0.join(format!("{name}.json")), value.to_string()).unwrap();
@@ -1064,11 +1073,9 @@ fn sustained_cpu_and_resident_findings_cover_processes_outside_rankings() {
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(text.starts_with("{\"findings\":"));
     let a: Value = serde_json::from_str(&text).unwrap();
+    // The Window is measured between the two process tables, never assumed to be --seconds.
     let window = a["window_seconds"].as_f64().unwrap();
-    assert!(
-        window >= 1.4,
-        "collection delay belongs to the actual Window"
-    );
+    assert!(window > 1.0, "{window}");
     assert!(a["processes"][2]["cpu_percent"].as_f64().unwrap() < 100.0);
     let findings = a["findings"].as_array().unwrap();
     assert_eq!(findings.len(), 4, "{findings:?}");
@@ -1808,30 +1815,40 @@ fn root_reads_other_users_footprints_and_ties_are_ordered_by_pid() {
     assert!(a["apps"][0]["started_at"].is_null());
 }
 
+// An unreadable process table skips the Processes, never a partial inventory, and the
+// machine-wide readings are still answered (sunfmin/control#1083).
+fn processes_skipped(lab: &Lab, seconds: &str) -> String {
+    let out = lab.run(&["now", "--seconds", seconds]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let a: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(a["processes"].is_null() && a["apps"].is_null());
+    assert!(a["rankings"]["processes_by_cpu"].is_null());
+    assert_eq!(a["host"]["memory"]["swap_used_bytes"], 8568459428u64);
+    let skipped = skip(&a, "processes");
+    assert_eq!(skipped["fix"], "hostvitals doctor && hostvitals now");
+    skipped["reason"].as_str().unwrap().to_owned()
+}
+
 #[test]
-fn malformed_or_failed_sources_refuse_instead_of_returning_partial_inventory() {
+fn malformed_or_failed_process_tables_skip_processes_instead_of_returning_partial_inventory() {
     for text in [
         "",
         "oops\n",
         "1 1 501 me bad-cpu 20 Mon Oct 12 00:00:00 2026 /bad\n",
     ] {
         let lab = Lab::new(text.into(), text.into());
-        let out = lab.run(&["now", "--seconds", "1"]);
-        assert!(!out.status.success());
-        let a: Value = serde_json::from_slice(&out.stdout).unwrap();
-        assert!(a["error"].as_str().unwrap().contains("hostvitals doctor"));
+        assert!(processes_skipped(&lab, "1").contains("hostvitals doctor"));
     }
     let rows = row(1, 501, "0:00.00", 1, "/one");
     let lab = Lab::new(rows.clone(), rows);
     lab.write("ps", json!({"exit_code":77,"stderr":"permission denied"}));
-    let out = lab.run(&["now", "--seconds", "1"]);
-    assert!(!out.status.success());
-    let a: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert!(a["error"].as_str().unwrap().contains("permission denied"));
+    assert!(processes_skipped(&lab, "1").contains("permission denied"));
     fs::remove_file(lab.0.join("bin/ps")).unwrap();
-    let out = lab.run(&["now"]);
-    let a: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert!(a["error"].as_str().unwrap().contains("PATH="));
+    assert!(processes_skipped(&lab, "1").contains("PATH="));
 }
 
 #[test]
@@ -1878,40 +1895,50 @@ fn live_now_reads_host_and_every_user_without_root() {
     );
     let a: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(a["source"], "host");
+    // On a crowded host the answer's bound can stop any read (ADR-0009), so each reading is
+    // either valid or named in `skipped` — never invented, never silently missing.
+    let skipped_measurement = |name: &str| {
+        a["skipped"].as_array().unwrap().iter().any(|s| {
+            let m = s["measurement"].as_str().unwrap();
+            m == name
+                || m.strip_prefix(name)
+                    .is_some_and(|rest| rest.starts_with('.'))
+        })
+    };
     let disk = &a["host"]["disk"];
     for field in ["read_bytes_per_second", "written_bytes_per_second"] {
         assert!(disk.get(field).is_some());
-        if let Some(rate) = disk[field].as_f64() {
-            assert!(rate.is_finite() && rate >= 0.0);
-        } else {
-            assert!(
-                a["skipped"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|s| s["measurement"].as_str().unwrap().starts_with("host.disk"))
-            );
+        match disk[field].as_f64() {
+            Some(rate) => assert!(rate.is_finite() && rate >= 0.0),
+            None => assert!(skipped_measurement("host.disk"), "{a}"),
         }
     }
-    assert!(disk["window_seconds"].as_f64().is_some_and(|s| s >= 1.0));
-    let volumes = a["volumes"].as_array().unwrap();
-    assert!(volumes.iter().any(|v| v["mount_point"] == "/"));
-    for v in volumes {
-        assert!(!v["filesystem"].as_str().unwrap().is_empty());
-        assert!(v["mount_point"].as_str().unwrap().starts_with('/'));
-        if let Some(share) = v["free_share"].as_f64() {
-            assert!((0.0..=1.0).contains(&share));
-        }
+    match disk["window_seconds"].as_f64() {
+        Some(seconds) => assert!(seconds >= 1.0),
+        None => assert!(skipped_measurement("host.disk"), "{a}"),
     }
-    assert!(a["host"]["battery"]["present"].is_boolean());
-    assert!(a["host"]["thermal"]["cpu_throttled"].is_boolean());
-    let skipped_measurement = |name: &str| {
-        a["skipped"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|s| s["measurement"] == name)
-    };
+    match a["volumes"].as_array() {
+        Some(volumes) => {
+            assert!(volumes.iter().any(|v| v["mount_point"] == "/"));
+            for v in volumes {
+                assert!(!v["filesystem"].as_str().unwrap().is_empty());
+                assert!(v["mount_point"].as_str().unwrap().starts_with('/'));
+                if let Some(share) = v["free_share"].as_f64() {
+                    assert!((0.0..=1.0).contains(&share));
+                }
+            }
+        }
+        None => assert!(skipped_measurement("volumes"), "{a}"),
+    }
+    assert!(
+        a["host"]["battery"]["present"].is_boolean() || skipped_measurement("battery"),
+        "{a}"
+    );
+    assert!(
+        a["host"]["thermal"]["cpu_throttled"].is_boolean()
+            || skipped_measurement("thermal.cpu_limits"),
+        "{a}"
+    );
     let thermal_pressure = &a["host"]["thermal"]["pressure"];
     assert!(
         ["nominal", "moderate", "heavy", "trapping", "sleeping"]
@@ -1941,38 +1968,14 @@ fn live_now_reads_host_and_every_user_without_root() {
                 assert!(value <= 1.0);
             }
         } else {
-            assert!(
-                a["skipped"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|s| s["measurement"] == "power"
-                        || s["measurement"] == format!("power.{key}"))
-            );
+            assert!(skipped_measurement("power"), "{a}");
         }
     }
-    assert!(
-        a["processes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|p| p["uid"] == 0 && p["energy_impact"].as_f64().is_some_and(|s| s >= 0.0))
-    );
-    assert!(a["host"]["network"]["window_seconds"].as_f64().unwrap() >= 1.0);
-    let network_processes = a["processes"].as_array().unwrap();
-    for direction in ["bytes_in_per_second", "bytes_out_per_second"] {
-        assert!(
-            network_processes.iter().any(
-                |p| p["uid"] == 0 && p["network"][direction].as_f64().is_some_and(|n| n >= 0.0)
-            ),
-            "root network unreadable: {a}"
-        );
-        for p in network_processes {
-            if let Some(rate) = p["network"][direction].as_f64() {
-                assert!(rate.is_finite() && rate >= 0.0);
-            }
-        }
+    match a["host"]["network"]["window_seconds"].as_f64() {
+        Some(seconds) => assert!(seconds >= 1.0),
+        None => assert!(skipped_measurement("network"), "{a}"),
     }
+    // CPU and memory come from libproc and Mach, which the bound never stops.
     let cpu = &a["host"]["cpu"];
     let mut total = 0.0;
     for key in ["user_percent", "system_percent", "idle_percent"] {
@@ -1991,7 +1994,31 @@ fn live_now_reads_host_and_every_user_without_root() {
         a["host"]["memory"]["swap_used_bytes"].as_u64().unwrap()
             <= a["host"]["memory"]["swap_total_bytes"].as_u64().unwrap()
     );
-    let processes = a["processes"].as_array().unwrap();
+    let Some(processes) = a["processes"].as_array() else {
+        assert!(skipped_measurement("processes"), "{a}");
+        assert!(a["rankings"]["processes_by_memory"].is_null());
+        return;
+    };
+    assert!(
+        processes
+            .iter()
+            .any(|p| p["uid"] == 0 && p["energy_impact"].as_f64().is_some_and(|s| s >= 0.0))
+            || skipped_measurement("energy_impact"),
+        "{a}"
+    );
+    for direction in ["bytes_in_per_second", "bytes_out_per_second"] {
+        assert!(
+            processes.iter().any(
+                |p| p["uid"] == 0 && p["network"][direction].as_f64().is_some_and(|n| n >= 0.0)
+            ) || skipped_measurement("network"),
+            "root network unreadable: {a}"
+        );
+        for p in processes {
+            if let Some(rate) = p["network"][direction].as_f64() {
+                assert!(rate.is_finite() && rate >= 0.0);
+            }
+        }
+    }
     assert!(
         processes
             .iter()
@@ -2285,4 +2312,141 @@ fn failed_empty_or_malformed_accelerator_reports_skip_only_the_gpu() {
         assert!(a["host"]["disk"]["read_bytes_per_second"].is_number());
         assert_eq!(a["host"]["thermal"]["pressure"], "nominal");
     }
+}
+
+#[test]
+fn a_crowded_process_table_still_answers_machine_wide_readings_within_the_bound() {
+    // sunfmin/control#1083: about 3,000 booting Simulator Processes made ps take past 8 s.
+    let rows: String = (1..=5000)
+        .map(|pid| row(pid, 501, "0:00.00", 1, "/launchd_sim"))
+        .collect();
+    let lab = Lab::new(rows.clone(), rows.clone());
+    lab.real_bound();
+    lab.write(
+        "ps",
+        json!({"delay_ms":12000,"stdout_readings":[rows.clone(), rows]}),
+    );
+    let start = std::time::Instant::now();
+    let out = lab.run(&["now", "--seconds", "1", "--top", "2"]);
+    let elapsed = start.elapsed();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    // The whole now answers within --seconds plus its collection allowance.
+    assert!(
+        elapsed < std::time::Duration::from_secs(1 + 5 + 1),
+        "now took {elapsed:?}"
+    );
+    let a: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(a["host"]["cpu"]["idle_percent"], 60.0);
+    assert_eq!(a["host"]["memory"]["pressure"], "warn");
+    assert_eq!(a["host"]["memory"]["swap_used_bytes"], 8568459428u64);
+    assert_eq!(a["volumes"][0]["mount_point"], "/");
+    assert_eq!(a["host"]["thermal"]["pressure"], "nominal");
+    assert!(a["host"]["disk"]["window_seconds"].is_f64());
+    assert!(
+        a["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["rule"] == "swap_used")
+    );
+    // The per-process part is missing, never an empty inventory.
+    for section in ["processes", "apps", "window_seconds"] {
+        assert!(a[section].is_null(), "{section}: {}", a[section]);
+    }
+    // Rankings keep their shape, each one unknown.
+    let rankings = a["rankings"].as_object().unwrap();
+    assert_eq!(rankings.len(), 12);
+    assert!(rankings.values().all(Value::is_null), "{rankings:?}");
+    let skipped = skip(&a, "processes");
+    let reason = skipped["reason"].as_str().unwrap();
+    assert!(reason.contains("ps"), "{reason}");
+    assert!(reason.contains("seconds"), "{reason}");
+    let fix = skipped["fix"].as_str().unwrap();
+    assert!(fix.contains("hostvitals doctor"), "{fix}");
+    assert!(!fix.contains("sudo"), "{fix}");
+}
+
+#[test]
+fn a_fixture_directory_widens_the_bound_so_slow_stand_ins_are_still_read() {
+    // A loaded test host starts stand-ins slowly; logic tests must not depend on its speed.
+    let rows = row(1, 501, "0:00.00", 1, "/one");
+    let lab = Lab::new(rows.clone(), rows.clone());
+    lab.process(1, 1);
+    lab.write(
+        "ps",
+        json!({"delay_ms":7000,"stdout_readings":[rows.clone(), rows]}),
+    );
+    let a = lab.answer();
+    assert_eq!(a["processes"][0]["pid"], 1, "{}", a["skipped"]);
+    assert!(
+        a["skipped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|s| s["measurement"] != "processes")
+    );
+}
+
+#[test]
+fn a_read_stopped_at_the_bound_names_the_allowance_it_was_given() {
+    let rows = row(1, 501, "0:00.00", 1, "/one");
+    let lab = Lab::new(rows.clone(), rows.clone());
+    lab.write(
+        "now-collection-seconds",
+        json!({"status":"available","data":2}),
+    );
+    lab.write(
+        "ps",
+        json!({"delay_ms":5000,"stdout_readings":[rows.clone(), rows]}),
+    );
+    let a = lab.answer();
+    let reason = skip(&a, "processes")["reason"].as_str().unwrap().to_owned();
+    assert!(reason.contains("--seconds plus 2 seconds"), "{reason}");
+}
+
+#[test]
+fn slow_window_snapshots_never_push_the_answer_past_its_bound() {
+    // sunfmin/control#1083, on the Hub at load 220-550: nettop's first snapshot took 5 s and
+    // the whole Window was slept after it, so `now --seconds 3` answered in 9-10 s.
+    let rows = row(1, 501, "0:00.00", 1, "/one");
+    let lab = Lab::new(rows.clone(), rows);
+    lab.process(1, 1);
+    lab.real_bound();
+    lab.write(
+        "nettop",
+        json!({"delay_ms":5000,"stdout":",bytes_in,bytes_out,\n"}),
+    );
+    lab.write(
+        "ioreg",
+        json!({"delay_ms":1000,"stdout":registry(&[(1, Some(100), Some(200))])}),
+    );
+    let start = std::time::Instant::now();
+    let out = lab.run(&["now", "--seconds", "3", "--top", "2"]);
+    let elapsed = start.elapsed();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(3 + 5),
+        "now took {elapsed:?}"
+    );
+    let a: Value = serde_json::from_slice(&out.stdout).unwrap();
+    // The disk Window ran beside nettop's, so it still closed in time.
+    assert!(
+        a["host"]["disk"]["window_seconds"]
+            .as_f64()
+            .is_some_and(|s| s >= 3.0),
+        "{a}"
+    );
+    // The network Window could not close before the bound: skipped, never shortened.
+    assert!(a["host"]["network"]["window_seconds"].is_null(), "{a}");
+    let reason = skip(&a, "network")["reason"].as_str().unwrap().to_owned();
+    assert!(reason.contains("bound"), "{reason}");
+    assert_eq!(a["processes"][0]["pid"], 1, "{}", a["skipped"]);
 }

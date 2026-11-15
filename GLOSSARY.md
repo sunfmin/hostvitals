@@ -7,6 +7,9 @@ The language of observing a Mac and its processes without changing their behavio
 **Process**: A running program identified by a process ID and a start time. A reused process ID denotes a different Process.
 _Avoid_: Task (when meaning the running program).
 
+**Process table**: Every Process on the host with its CPU time and Resident memory, as one read lists them. It is the per-process part of an observation; the host's own readings do not depend on it.
+_Avoid_: Snapshot (also used for host and network readings), process list (when CPU and memory are meant too).
+
 **App**: The Process macOS holds responsible for a Process, as Activity Monitor groups them. A Process with no other responsible Process is its own App.
 _Avoid_: Parent, bundle (neither necessarily identifies the responsible Process).
 

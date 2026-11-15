@@ -1,7 +1,7 @@
 //! A complete capability inventory; missing capabilities are answers, not command failures.
 use crate::{
     direct::{self, Reading, Source},
-    tools::Tool,
+    tools::{NOW_COLLECTION_SECONDS, Tool, ps},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -33,9 +33,10 @@ pub fn answer(source: &Source) -> Result<Value, String> {
         let command = "hostvitals doctor".to_string();
         match path {
             None => checks.push(json!({"name":tool.name(),"kind":"cli","status":"unavailable","reason":"executable not found on PATH","fix":format!("PATH=/usr/bin:/bin:/usr/sbin:/sbin:$PATH {command}")})),
+            Some(_) if matches!(tool, Tool::Ps) => checks.push(process_table(source, is_root)),
             Some(path) if hostvitals_policy::may_probe(true, tool.needs_root(), is_root) => match tool.probe(path) {
                 Ok(()) => checks.push(json!({"name":tool.name(),"kind":"cli","status":"available"})),
-                Err(reason) => checks.push(json!({"name":tool.name(),"kind":"cli","status":"unavailable","reason":reason,"fix":if is_root { command } else { "sudo hostvitals doctor".into() },"guidance":"For a permission denial, the caller can retry as root. If the CLI interface changed, update hostvitals before retrying."})),
+                Err(reason) => checks.push(failed(*tool, reason, is_root)),
             },
             Some(_) => checks.push(json!({"name":tool.name(),"kind":"cli","status":"skipped","reason":"measurement requires root","fix":"sudo hostvitals doctor"})),
         }
@@ -59,6 +60,40 @@ pub fn answer(source: &Source) -> Result<Value, String> {
     Ok(
         json!({"source":if source.0.is_some() { "fixtures" } else { "host" },"host":{"macos_version":host.macos_version,"arch":host.arch,"is_root":is_root},"checks":checks}),
     )
+}
+/// Times the process-table read now takes, because a crowded host slows it past now's bound.
+fn process_table(source: &Source, is_root: bool) -> Value {
+    let start = std::time::Instant::now();
+    let table = ps::snapshot();
+    let seconds = start.elapsed().as_secs_f64();
+    let counted = match source.read("process-count", direct::libproc::process_count) {
+        Reading::Available { data } => Some(data),
+        Reading::Unavailable { .. } => None,
+    };
+    let processes = counted.or(table.as_ref().ok().map(|t| t.len() as u64));
+    if seconds >= NOW_COLLECTION_SECONDS as f64 {
+        let count = processes.map_or("an uncounted number of processes".into(), |n| {
+            format!("{n} processes")
+        });
+        let outcome = match &table {
+            Ok(_) => format!("took {seconds:.1} seconds"),
+            Err(reason) => format!("was not read after {seconds:.1} seconds ({reason})"),
+        };
+        return json!({"name":"ps","kind":"cli","status":"unavailable",
+            "reason":format!("the process table of {count} {outcome} with ps; now leaves it {NOW_COLLECTION_SECONDS} seconds past its Window, so now answers without Processes"),
+            "fix":"ps -A -o user= | sort | uniq -c | sort -rn | head -5 && hostvitals doctor",
+            "guidance":"ps slows as thousands of Processes are runnable, and root does not speed it. Meanwhile now still answers its machine-wide readings, with Processes skipped. The fix's first command names the users whose Processes crowd the host; stop what they run (booting iOS Simulators: `xcrun simctl shutdown all` as that user), then run the doctor again."});
+    }
+    match table {
+        Ok(_) => {
+            json!({"name":"ps","kind":"cli","status":"available","data":{"processes":processes,"seconds":seconds}})
+        }
+        Err(reason) => failed(Tool::Ps, reason, is_root),
+    }
+}
+/// A CLI that answered with a failure, which root or a newer hostvitals may repair.
+fn failed(tool: Tool, reason: String, is_root: bool) -> Value {
+    json!({"name":tool.name(),"kind":"cli","status":"unavailable","reason":reason,"fix":if is_root { "hostvitals doctor" } else { "sudo hostvitals doctor" },"guidance":"For a permission denial, the caller can retry as root. If the CLI interface changed, update hostvitals before retrying."})
 }
 fn native<T: Serialize>(name: &str, reading: Reading<T>) -> Value {
     match reading {

@@ -4,6 +4,7 @@ use std::{
     env, fs,
     path::PathBuf,
     process::{Command, Stdio},
+    sync::OnceLock,
     thread,
     time::{Duration, Instant},
 };
@@ -26,7 +27,7 @@ pub(crate) mod vmmap;
 /// The closed set of Apple CLIs doctor probes, shared with the CLI stand-in.
 #[derive(Clone, Copy, clap::ValueEnum, agent_help::Help)]
 pub enum Tool {
-    /// Process CPU and resident memory; found on PATH.
+    /// The process table: every Process's CPU and resident memory, timed by doctor; found on PATH.
     Ps,
     /// Entitled process CPU, memory and energy-impact snapshots; found on PATH.
     Top,
@@ -81,7 +82,7 @@ impl Tool {
     pub fn probe(self, path: PathBuf) -> Result<(), String> {
         let pid = std::process::id().to_string();
         let args = match self {
-            Self::Ps => ps::args(&pid),
+            Self::Ps => return ps::snapshot().map(|_| ()),
             Self::Top => top::args(&pid),
             Self::Nettop => nettop::args(&pid),
             Self::Iostat => iostat::args(&pid),
@@ -139,6 +140,49 @@ pub const MEASUREMENT_TIMEOUT_SECONDS: u64 = 30;
 /// Maximum wall-clock duration of one Apple CLI capability check.
 pub const PROBE_TIMEOUT_SECONDS: u64 = 8;
 
+/// Time `now` allows past its Window for every read to finish, so the whole answer comes within `--seconds` plus this.
+pub const NOW_COLLECTION_SECONDS: u64 = 5;
+
+/// Time kept after the last read is stopped, to stop it and write the answer: on Studio64 at a
+/// load of 190-390 with no idle CPU that took 0.13-0.31 s (sunfmin/control#1083).
+pub const NOW_FINISH_MILLISECONDS: u64 = 500;
+
+/// The instant by which this invocation must answer, with the allowance past the Window it was given; every later read is stopped there.
+static ANSWER_BY: OnceLock<(Instant, u64)> = OnceLock::new();
+
+/// Bounds every read for the rest of this invocation to `seconds` plus `allowance` from this
+/// process's start, so no one read can spend the whole answer's time and a caller's clock, which
+/// also counts a slow start on a crowded host, agrees with the bound.
+pub(crate) fn answer_by(seconds: u64, allowance: u64) {
+    let bound = Duration::from_secs(seconds.saturating_add(allowance))
+        .saturating_sub(Duration::from_millis(NOW_FINISH_MILLISECONDS));
+    let age = crate::direct::libproc::own_age().unwrap_or_default();
+    let now = Instant::now();
+    let _ = ANSWER_BY.set((
+        now.checked_add(bound.saturating_sub(age)).unwrap_or(now),
+        allowance,
+    ));
+}
+
+/// Waits `duration`, or fails at once with the bound's reason when the answer's bound comes first.
+pub(crate) fn wait_within_bound(duration: Duration) -> Result<(), String> {
+    match ANSWER_BY.get() {
+        Some((deadline, allowance))
+            if deadline.saturating_duration_since(Instant::now()) < duration =>
+        {
+            Err(stopped_at_bound(*allowance))
+        }
+        _ => {
+            thread::sleep(duration);
+            Ok(())
+        }
+    }
+}
+
+fn stopped_at_bound(allowance: u64) -> String {
+    format!("read stopped at this answer's bound of --seconds plus {allowance} seconds")
+}
+
 /// Bounds execution and diagnostics, retaining snapshot output only when requested.
 fn run(command: &mut Command, capture: bool) -> Result<Vec<u8>, String> {
     execute(
@@ -171,6 +215,27 @@ struct Captured {
 }
 
 fn execute(command: &mut Command, limit: usize, timeout: Duration) -> Result<Captured, String> {
+    // A read cut short by the answer's deadline says so, rather than claiming its own limit passed.
+    let bound = ANSWER_BY
+        .get()
+        .map(|(deadline, allowance)| {
+            (
+                deadline.saturating_duration_since(Instant::now()),
+                *allowance,
+            )
+        })
+        .filter(|(remaining, _)| *remaining < timeout);
+    let timeout = bound.map_or(timeout, |(remaining, _)| remaining);
+    let expired = || {
+        if let Some((_, allowance)) = bound {
+            stopped_at_bound(allowance)
+        } else {
+            format!("read exceeded {} seconds", timeout.as_secs_f64())
+        }
+    };
+    if timeout.is_zero() {
+        return Err(expired());
+    }
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -190,7 +255,7 @@ fn execute(command: &mut Command, limit: usize, timeout: Duration) -> Result<Cap
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                break Err(format!("read exceeded {} seconds", timeout.as_secs_f64()));
+                break Err(expired());
             }
             Err(e) => {
                 let _ = child.kill();

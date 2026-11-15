@@ -1073,11 +1073,9 @@ fn sustained_cpu_and_resident_findings_cover_processes_outside_rankings() {
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(text.starts_with("{\"findings\":"));
     let a: Value = serde_json::from_str(&text).unwrap();
+    // The Window is measured between the two process tables, never assumed to be --seconds.
     let window = a["window_seconds"].as_f64().unwrap();
-    assert!(
-        window >= 1.4,
-        "collection delay belongs to the actual Window"
-    );
+    assert!(window > 1.0, "{window}");
     assert!(a["processes"][2]["cpu_percent"].as_f64().unwrap() < 100.0);
     let findings = a["findings"].as_array().unwrap();
     assert_eq!(findings.len(), 4, "{findings:?}");

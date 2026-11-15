@@ -12,7 +12,8 @@ fn main() {
     if name == "profile-target" {
         let dir = Path::new(&args[1]);
         fs::write(dir.join("target-ready"), "").unwrap();
-        let deadline = Instant::now() + Duration::from_secs(20);
+        // Longer than the live test's waits for readiness, collection and stacks.
+        let deadline = Instant::now() + Duration::from_secs(40);
         while !dir.join("target-release").exists() {
             assert!(Instant::now() < deadline, "profile target was not released");
             thread::sleep(Duration::from_millis(10));

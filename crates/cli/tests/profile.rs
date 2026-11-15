@@ -366,7 +366,12 @@ fn live_ended_process_retains_the_same_report_that_was_summarized() {
     let answer_path = lab.0.join("answer.json");
     let mut observer = ReapedChild(
         Command::new(env!("CARGO_BIN_EXE_hostvitals"))
-            .args(["profile", &child.0.id().to_string(), "--seconds", "8"])
+            .args([
+                "profile",
+                &child.0.id().to_string(),
+                "--seconds",
+                &WINDOW.as_secs().to_string(),
+            ])
             .env("TMPDIR", &lab.0)
             .env(
                 "PATH",
@@ -399,8 +404,30 @@ fn live_ended_process_retains_the_same_report_that_was_summarized() {
         thread::sleep(Duration::from_millis(10));
     }
     let collecting = Instant::now();
-    // The announcement precedes actual stack collection; allow for a busy host.
-    thread::sleep(Duration::from_secs(2));
+    // The announcement precedes the first stack by as long as the host makes
+    // sample wait. Release the target only once sample has taken stacks.
+    let task = TaskName::of(child.0.id());
+    let stack_deadline = collecting + STACK_WAIT;
+    let (mut suspended, mut suspensions) = (false, 0);
+    while suspensions < SUSPENSIONS {
+        let now = task.suspended();
+        if suspended && !now {
+            suspensions += 1;
+        }
+        suspended = now;
+        assert!(
+            observer.0.try_wait().unwrap().is_none(),
+            "observer exited before sample took a stack: {}",
+            fs::read_to_string(&answer_path).unwrap()
+        );
+        assert!(
+            Instant::now() < stack_deadline,
+            "sample suspended the target {suspensions} of {SUSPENSIONS} times within {} s of announcing collection",
+            STACK_WAIT.as_secs()
+        );
+        thread::yield_now();
+    }
+    let stacks_taken = collecting.elapsed();
     assert!(child.0.try_wait().unwrap().is_none());
     fs::write(lab.0.join("target-release"), "").unwrap();
     let completion_deadline = Instant::now() + Duration::from_secs(10);
@@ -414,10 +441,10 @@ fn live_ended_process_retains_the_same_report_that_was_summarized() {
     assert!(child.0.wait().unwrap().success());
     let ended_after = collecting.elapsed();
     assert!(
-        ended_after < Duration::from_secs(8),
+        ended_after < WINDOW,
         "target must end before the requested Window completes"
     );
-    let observation_deadline = Instant::now() + Duration::from_secs(40);
+    let observation_deadline = Instant::now() + WINDOW + Duration::from_secs(40);
     while observer.0.try_wait().unwrap().is_none() {
         assert!(
             Instant::now() < observation_deadline,
@@ -464,11 +491,84 @@ fn live_ended_process_retains_the_same_report_that_was_summarized() {
         0o700
     );
     eprintln!(
-        "live profile: {} samples, {} waiting; target ended {} ms after collection announcement",
+        "live profile: {} samples, {} waiting; {SUSPENSIONS} suspensions {} ms and target end {} ms after collection announcement",
         summary.total_samples,
         summary.waiting_samples,
+        stacks_taken.as_millis(),
         ended_after.as_millis()
     );
+}
+
+/// The live test's requested Window. sample stops when the target ends, so a
+/// long Window costs nothing once a stack is taken; it leaves room for a host
+/// that delays the first one.
+const WINDOW: Duration = Duration::from_secs(20);
+/// How long after sample's announcement the live test waits for its stacks,
+/// short of the Window so the target still ends inside it.
+const STACK_WAIT: Duration = Duration::from_secs(15);
+/// The completed suspensions of the target the live test waits for. sample's
+/// first four take no stack: a target killed after k of them left k - 4
+/// stacks in its report (k = 5, 10, 50 gave 1, 6, 46; k = 1, 2 gave none).
+/// Fifty leaves enough stacks for Mostly waiting to be a finding.
+const SUSPENSIONS: u32 = 50;
+
+/// A Process's Mach task name port. It is readable by the Process's owner
+/// without a task port and shows the suspend count, which sample raises while
+/// it takes each stack, so counting suspensions that have ended counts the
+/// stacks taken.
+/// This is only the test's coordination signal; the report stays the product's
+/// sole observation.
+struct TaskName(u32);
+
+// Darwin mach/task_info.h, mach_task_basic_info: three 64-bit sizes, two
+// time_value_t (four 32-bit integers), policy, then suspend_count.
+#[repr(C)]
+#[derive(Default)]
+struct MachTaskBasicInfo {
+    sizes: [u64; 3],
+    times: [i32; 4],
+    policy: i32,
+    suspend_count: i32,
+}
+const MACH_TASK_BASIC_INFO: i32 = 20;
+
+unsafe extern "C" {
+    static mach_task_self_: u32;
+    fn task_name_for_pid(target: u32, pid: i32, name: *mut u32) -> i32;
+    fn task_info(task: u32, flavor: i32, info: *mut i32, count: *mut u32) -> i32;
+    fn mach_port_deallocate(task: u32, name: u32) -> i32;
+}
+
+impl TaskName {
+    fn of(pid: u32) -> Self {
+        let mut name = 0;
+        // SAFETY: task_name_for_pid writes one port name to the given pointer.
+        let kr = unsafe { task_name_for_pid(mach_task_self_, pid as i32, &mut name) };
+        assert_eq!(kr, 0, "task_name_for_pid({pid}) failed: {kr}");
+        Self(name)
+    }
+    fn suspended(&self) -> bool {
+        let mut info = MachTaskBasicInfo::default();
+        let mut count = (std::mem::size_of::<MachTaskBasicInfo>() / 4) as u32;
+        // SAFETY: MACH_TASK_BASIC_INFO fills at most `count` 32-bit words of the buffer.
+        let kr = unsafe {
+            task_info(
+                self.0,
+                MACH_TASK_BASIC_INFO,
+                (&mut info as *mut MachTaskBasicInfo).cast(),
+                &mut count,
+            )
+        };
+        assert_eq!(kr, 0, "task_info of the target failed: {kr}");
+        info.suspend_count > 0
+    }
+}
+
+impl Drop for TaskName {
+    fn drop(&mut self) {
+        // SAFETY: the name was returned by task_name_for_pid and is released once.
+        unsafe { mach_port_deallocate(mach_task_self_, self.0) };
+    }
 }
 
 struct ReapedChild(Child);

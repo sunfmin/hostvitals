@@ -1808,30 +1808,40 @@ fn root_reads_other_users_footprints_and_ties_are_ordered_by_pid() {
     assert!(a["apps"][0]["started_at"].is_null());
 }
 
+// An unreadable process table skips the Processes, never a partial inventory, and the
+// machine-wide readings are still answered (sunfmin/control#1083).
+fn processes_skipped(lab: &Lab, seconds: &str) -> String {
+    let out = lab.run(&["now", "--seconds", seconds]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let a: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(a["processes"].is_null() && a["apps"].is_null());
+    assert!(a["rankings"]["processes_by_cpu"].is_null());
+    assert_eq!(a["host"]["memory"]["swap_used_bytes"], 8568459428u64);
+    let skipped = skip(&a, "processes");
+    assert_eq!(skipped["fix"], "hostvitals doctor && hostvitals now");
+    skipped["reason"].as_str().unwrap().to_owned()
+}
+
 #[test]
-fn malformed_or_failed_sources_refuse_instead_of_returning_partial_inventory() {
+fn malformed_or_failed_process_tables_skip_processes_instead_of_returning_partial_inventory() {
     for text in [
         "",
         "oops\n",
         "1 1 501 me bad-cpu 20 Mon Oct 12 00:00:00 2026 /bad\n",
     ] {
         let lab = Lab::new(text.into(), text.into());
-        let out = lab.run(&["now", "--seconds", "1"]);
-        assert!(!out.status.success());
-        let a: Value = serde_json::from_slice(&out.stdout).unwrap();
-        assert!(a["error"].as_str().unwrap().contains("hostvitals doctor"));
+        assert!(processes_skipped(&lab, "1").contains("hostvitals doctor"));
     }
     let rows = row(1, 501, "0:00.00", 1, "/one");
     let lab = Lab::new(rows.clone(), rows);
     lab.write("ps", json!({"exit_code":77,"stderr":"permission denied"}));
-    let out = lab.run(&["now", "--seconds", "1"]);
-    assert!(!out.status.success());
-    let a: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert!(a["error"].as_str().unwrap().contains("permission denied"));
+    assert!(processes_skipped(&lab, "1").contains("permission denied"));
     fs::remove_file(lab.0.join("bin/ps")).unwrap();
-    let out = lab.run(&["now"]);
-    let a: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert!(a["error"].as_str().unwrap().contains("PATH="));
+    assert!(processes_skipped(&lab, "1").contains("PATH="));
 }
 
 #[test]

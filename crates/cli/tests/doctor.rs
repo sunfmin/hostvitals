@@ -143,6 +143,8 @@ impl Lab {
             "ioreg",
             json!({"stdout":include_str!("fixtures/ioreg.xml")}),
         );
+        // ps's check reads the whole process table, which is never empty.
+        self.write("ps", json!({"stdout":table(1)}));
     }
     fn calls(&self, name: &str) -> Vec<Vec<String>> {
         let state: hostvitals::tools::StandIn =
@@ -361,4 +363,10 @@ fn native_fixture_failures_are_independent_and_never_fall_back_to_the_host() {
         assert_eq!(check["status"], "unavailable");
         assert!(check["reason"].as_str().unwrap().starts_with("fixture"));
     }
+}
+
+fn table(count: u32) -> String {
+    (1..=count)
+        .map(|pid| format!("{pid} 1 501 owner 0:00.00 1 Mon Oct 12 17:34:33 2026 /p\n"))
+        .collect()
 }

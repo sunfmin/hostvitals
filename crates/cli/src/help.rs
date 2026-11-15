@@ -72,7 +72,9 @@ pub(crate) enum Command {
     },
     /// Judges and measures CPU, memory, disk, network and energy over one window for the host, every user's processes and their Apps.
     ///
-    /// Run `hostvitals now --seconds 3 --top 10`. Reads two all-user `ps` and `nettop` snapshots, two structured `ioreg` block-storage inventories, one `ioreg` accelerator inventory, `notifyutil -g {const:THERMAL_PRESSURE_KEY}`, cumulative host CPU ticks, memory sysctls, process responsibility, two accessible rusage readings, and `df -a -l -k -P` for every mounted local volume. Only reads; saves nothing. `--seconds` and `--top` require a whole number at least 1. Refusals name the corrected command. Missing or malformed process or host snapshots refuse with a retry line; optional native, disk, volume, network, memory pressure, thermal and GPU reads are null with a `skipped` entry. Memory pressure, thermal pressure and GPU utilization need no root.
+    /// Run `hostvitals now --seconds 3 --top 10`. Reads two all-user `ps` and `nettop` snapshots, two structured `ioreg` block-storage inventories, one `ioreg` accelerator inventory, `notifyutil -g {const:THERMAL_PRESSURE_KEY}`, cumulative host CPU ticks, memory sysctls, process responsibility, two accessible rusage readings, and `df -a -l -k -P` for every mounted local volume. Only reads; saves nothing. `--seconds` and `--top` require a whole number at least 1. Refusals name the corrected command. Missing or malformed host snapshots refuse with a retry line; optional native, disk, volume, network, memory pressure, thermal and GPU reads are null with a `skipped` entry. Memory pressure, thermal pressure and GPU utilization need no root.
+    ///
+    /// Answers within `--seconds` plus {const:NOW_COLLECTION_SECONDS} seconds, however crowded the host: every CLI read is stopped at that bound, and the first process table is read beside the Window rather than before it. A process table that ps cannot list by then, or that is missing or malformed, leaves `processes`, `apps`, `window_seconds` and every Ranking in `rankings` null with one `processes` skipped entry naming why and `hostvitals doctor && hostvitals now`; host CPU, memory, pressure, swap, disk, network, power, thermal, GPU and volumes are still answered, with their host Findings, and the command exits zero. Doctor's `ps` check times that read and counts the Processes.
     ///
     /// Answers `findings` before the raw sections. Other keys are `source` (`host` or `fixtures`), `window_seconds` (actual monotonic time between process readings), `host`, `processes` (the entire final snapshot), `apps` (totals of those processes), `volumes`, `rankings` and `skipped`. Host CPU covers the same window with minor snapshot collection skew. CPU percentages for processes and Apps use one logical core as 100%, so multithreaded work can exceed 100%. Host percentages cover all cores and total 100%.
     ///
@@ -141,6 +143,8 @@ pub(crate) enum Command {
     /// Answers `{"source":"host","host":{"macos_version":"27.0.1","arch":"arm64","is_root":false},"checks":[...]}`. `source` is `fixtures` only when the explicit testing environment `HOSTVITALS_PROBE_FIXTURES` supplies native observations. `host.macos_version` is the product version; `arch` is the binary's arm64 or x86_64 architecture; `is_root` describes its effective user.
     ///
     /// Each check has `name`, `kind` (`cli` or `direct`), and `status` (`available`, `unavailable`, or `skipped`). An unavailable or skipped check also has `reason` and `fix`, a command to retry or enable the read; `guidance`, when present, explains an interface change. A missing executable uses a PATH repair. A CLI failure includes its exit status and bounded stderr. A probe is stopped after {const:PROBE_TIMEOUT_SECONDS} seconds. Private interfaces can change: they are reported unavailable, never substituted with invented readings. An unavailable private interface may need a newer hostvitals; root does not repair a missing interface.
+    ///
+    /// The `ps` check reads the whole process table, the read `now` takes, and times it. Available, its `data` has `processes` (every Process on the host, counted with libproc's proc_listallpids, which takes milliseconds) and `seconds` (how long ps took). A read of {const:NOW_COLLECTION_SECONDS} seconds or more, finished or stopped, is unavailable: its `reason` names the time and the process count, and its `fix` lists the users with the most Processes, then reruns the doctor. ps slows when thousands of Processes are runnable, such as booting iOS Simulators; root does not speed it, so the fix stops what crowds the host rather than retrying as root. `now` still answers its machine-wide readings meanwhile.
     ///
     /// Available direct checks also have `data`. `rusage`: `resident_bytes` (RAM), `footprint_bytes` (charged memory), `peak_footprint_bytes` (lifetime peak), `read_bytes` and `written_bytes` (cumulative disk I/O), and `energy_nj` (cumulative energy in nanojoules), for this process. `libproc`: `pid`, `resident_bytes`, and `threads` for this process. `ioreport`: `energy_channels` discovered and `sampled_channels` actually read, both channel counts, not watts. CPU energy must also advance over a short probe; zero or stale CPU counters are reported unavailable because discovery, sampling and positive lifetime values alone do not establish readable Power. Other components can still be readable in now. `responsibility`: this process's `pid` and responsible `app_pid`; a process with no other responsible process is its own App.
     ///
@@ -217,6 +221,10 @@ pub(crate) fn manual() -> Help {
             hostvitals_policy::redaction::SECRET_FLAG_WORDS.join(", "),
         )
         .constant("PROBE_TIMEOUT_SECONDS", crate::tools::PROBE_TIMEOUT_SECONDS)
+        .constant(
+            "NOW_COLLECTION_SECONDS",
+            crate::tools::NOW_COLLECTION_SECONDS,
+        )
         .constant(
             "MEASUREMENT_TIMEOUT_SECONDS",
             crate::tools::MEASUREMENT_TIMEOUT_SECONDS,

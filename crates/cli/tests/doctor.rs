@@ -370,3 +370,58 @@ fn table(count: u32) -> String {
         .map(|pid| format!("{pid} 1 501 owner 0:00.00 1 Mon Oct 12 17:34:33 2026 /p\n"))
         .collect()
 }
+
+#[test]
+fn doctor_times_the_process_table_read_and_counts_its_processes() {
+    let lab = Lab::new();
+    lab.install_clis();
+    lab.write("ps", json!({"stdout":table(3)}));
+    lab.write("process-count", json!({"status":"available","data":3}));
+    let out = lab.run(&["doctor"]);
+    assert!(out.status.success());
+    let answer: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let check = answer["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "ps")
+        .unwrap()
+        .clone();
+    assert_eq!(check["status"], "available", "{check}");
+    assert_eq!(check["data"]["processes"], 3);
+    assert!(check["data"]["seconds"].as_f64().unwrap() < 5.0);
+    // The process table is the read now takes, not a one-pid probe.
+    assert_eq!(lab.calls("ps")[0][0], "-Aww");
+}
+
+#[test]
+fn doctor_names_a_slow_process_table_read_with_its_time_and_count_and_a_fix_root_does_not_need() {
+    let lab = Lab::new();
+    lab.install_clis();
+    lab.write("ps", json!({"stdout":table(3),"delay_ms":6000}));
+    lab.write("process-count", json!({"status":"available","data":3058}));
+    let out = lab.run(&["doctor"]);
+    assert!(out.status.success());
+    let answer: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let check = answer["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "ps")
+        .unwrap()
+        .clone();
+    assert_eq!(check["status"], "unavailable", "{check}");
+    let reason = check["reason"].as_str().unwrap();
+    assert!(reason.contains("3058 processes"), "{reason}");
+    assert!(reason.contains(" seconds"), "{reason}");
+    assert!(reason.contains("6."), "{reason}");
+    let fix = check["fix"].as_str().unwrap();
+    assert!(!fix.contains("sudo"), "{fix}");
+    assert!(fix.contains("hostvitals doctor"), "{fix}");
+    assert!(
+        check["guidance"]
+            .as_str()
+            .unwrap()
+            .contains("root does not")
+    );
+}

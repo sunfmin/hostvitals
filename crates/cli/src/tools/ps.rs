@@ -1,8 +1,5 @@
 //! Entitled process inventory, cumulative CPU and resident memory from ps.
 use std::collections::BTreeMap;
-pub(super) fn args(pid: &str) -> Vec<&str> {
-    vec!["-p", pid, "-o", "pid=,pcpu=,rss="]
-}
 
 /// Reads every user's cumulative CPU and resident memory, without command arguments.
 pub(crate) fn snapshot() -> Result<BTreeMap<u32, SnapshotProcess>, String> {

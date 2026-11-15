@@ -1,0 +1,13 @@
+# `now` answers within its bound, with or without the process table
+
+`hostvitals now` answers within `--seconds` plus `NOW_COLLECTION_SECONDS` (5) seconds: 8 seconds for Guild's `--seconds 3`. Every CLI read it starts is stopped at that deadline, the first process table is read beside the Window instead of before it, and the machine-wide readings taken at the Window's end (df, pmset, notifyutil, ioreg's accelerators) run beside the second process table rather than after it. A process table that cannot be read by the deadline, or is missing or malformed, leaves `processes`, `apps`, `window_seconds` and every Ranking in `rankings` null with one `processes` skipped entry; `rankings` stays an object, so a caller that reads it as one, such as afkconvoy, keeps the rest of the answer. Host CPU, memory, pressure, swap, disk, network, power, thermal, GPU and volumes are still answered, with their host Findings, and `now` exits zero. A partial process table is never answered.
+
+The cause was Studio64 on 2026-11-15, 11:17–11:40 JST ([sunfmin/control#1083](https://github.com/sunfmin/control/issues/1083)): about 3,058 Processes, many of them iOS Simulator daemons booting for another user, and a load average of 450–550 with the CPU only about 40% busy. `ps` took past its 8-second bound, so every `now` refused, and Guild, which reads its machine only through `now` (ADR-0008), refused every start for over 20 minutes. Until then a failed process table refused the whole answer, which cost the machine-wide readings that Guild's admission needs and that the table does not affect.
+
+`ps` stays the process table's source (ADR-0002): it is setuid root, and a third-party binary's libproc task information fails for root Processes such as fseventsd, so a libproc table would lose the very Processes ADR-0008 was made for. libproc's `proc_listallpids`, which lists every pid in milliseconds without root, only counts them: `hostvitals doctor`'s `ps` check reads the whole table, times it, and when it takes `NOW_COLLECTION_SECONDS` or more names the time and that count. Its fix lists the users with the most Processes and reruns the doctor, because root does not make ps faster; what works is stopping what crowds the host.
+
+## Considered options
+
+- **A ps bound that scales with the process count.** It keeps the table on a crowded host, but the whole answer then has no bound, and a caller waiting on the machine-wide readings waits on ps. Rejected.
+- **The process table from libproc.** Fast, but it cannot read root Processes' CPU and memory without root (ADR-0002). Rejected.
+- **Keep the final table when only the first one fails.** It would give Resident without CPU; one rule for both readings is simpler to rely on, and a crowded host fails both. Rejected.

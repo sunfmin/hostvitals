@@ -1,4 +1,5 @@
 //! Task information readable for this process via libproc; this is not the source for other users' processes.
+//! It also counts every Process on the host, which takes milliseconds where ps can take seconds.
 use super::Reading;
 use serde::{Deserialize, Serialize};
 #[derive(Deserialize, Serialize)]
@@ -23,6 +24,28 @@ unsafe extern "C" {
         buffer: *mut std::ffi::c_void,
         size: i32,
     ) -> i32;
+    fn proc_listallpids(buffer: *mut std::ffi::c_void, size: i32) -> i32;
+}
+/// Counts every Process on the host, every user's, without spawning anything.
+pub fn process_count() -> Reading<u64> {
+    // SAFETY: a null buffer asks only for the current number of pids.
+    let estimate = unsafe { proc_listallpids(std::ptr::null_mut(), 0) };
+    if estimate <= 0 {
+        return Reading::Unavailable {
+            reason: format!("proc_listallpids: {}", std::io::Error::last_os_error()),
+        };
+    }
+    // Room for Processes started between the two calls.
+    let mut pids = vec![0i32; estimate as usize + 256];
+    let size = (pids.len() * std::mem::size_of::<i32>()) as i32;
+    // SAFETY: the buffer holds `size` writable bytes of pid_t.
+    let count = unsafe { proc_listallpids(pids.as_mut_ptr().cast(), size) };
+    if count <= 0 {
+        return Reading::Unavailable {
+            reason: format!("proc_listallpids: {}", std::io::Error::last_os_error()),
+        };
+    }
+    Reading::Available { data: count as u64 }
 }
 /// Checks task information for the observer without seeking a task port.
 pub fn read() -> Reading<Task> {

@@ -1,7 +1,7 @@
 //! One observation window, retaining missing measurements rather than manufacturing zeroes.
 use crate::{
     direct::{self, Reading, Source},
-    tools::{df, ioreg, nettop, ps, top as top_tool},
+    tools::{NOW_COLLECTION_SECONDS, df, ioreg, nettop, ps, top as top_tool},
 };
 use hostvitals_policy as policy;
 use serde::Serialize;
@@ -87,12 +87,77 @@ impl Network {
     }
 }
 
+/// One process-table reading, with the rusage read beside it.
+struct Table {
+    processes: BTreeMap<u32, ps::SnapshotProcess>,
+    at: Instant,
+    usage: BTreeMap<u32, Usage>,
+}
+fn table(source: &Source, euid: u32, baseline: bool) -> Result<Table, String> {
+    let processes = ps::snapshot()?;
+    let at = Instant::now();
+    let usage = usages(source, &processes, euid, baseline);
+    Ok(Table {
+        processes,
+        at,
+        usage,
+    })
+}
+
+/// The machine-wide readings taken at the Window's end, which never wait on the process table.
+struct Machine {
+    volumes: Option<Vec<df::Volume>>,
+    battery: Value,
+    thermal: Value,
+    accelerators: Option<Vec<ioreg::Accelerator>>,
+    findings: Vec<Value>,
+    skipped: Vec<Value>,
+}
+fn machine() -> Machine {
+    let mut skipped = Vec::new();
+    let mut findings = Vec::new();
+    let volumes = match df::snapshot() {
+        Ok(volumes) => {
+            let unavailable = volumes.iter().filter(|v| v.free_share.is_none()).count();
+            if unavailable > 0 {
+                skipped.push(json!({"measurement":"volumes","count":unavailable,"reason":"volume capacity or available bytes unknown, invalid, overflowed or zero capacity; no free-space ratio can be judged","fix":"df -a -l -k -P && hostvitals now"}));
+            }
+            for v in &volumes {
+                if policy::disk::low_free(v.size_bytes, v.free_bytes) {
+                    findings.push(json!({"rule":"volume_free","subject":{"kind":"volume","filesystem":v.filesystem,"mount_point":v.mount_point},"measured":{"size_bytes":v.size_bytes,"free_bytes":v.free_bytes,"free_share":v.free_share},"threshold":{"comparison":"<","percent":policy::disk::VOLUME_FREE_PERCENT},"next_command":"diskreap scan"}));
+                }
+            }
+            Some(volumes)
+        }
+        Err(reason) => {
+            skipped.push(json!({"measurement":"volumes","count":1,"reason":reason,"fix":"PATH=/usr/bin:/bin:/usr/sbin:/sbin:$PATH df -a -l -k -P && hostvitals now"}));
+            None
+        }
+    };
+    let battery = crate::energy::battery(&mut skipped);
+    let thermal = crate::energy::thermal(&mut skipped, &mut findings);
+    let accelerators = gpu_utilization(&mut skipped);
+    Machine {
+        volumes,
+        battery,
+        thermal,
+        accelerators,
+        findings,
+        skipped,
+    }
+}
+
+/// Answers within `seconds` plus [`NOW_COLLECTION_SECONDS`]: a process table that cannot be
+/// read by then leaves only the per-process part missing.
 pub fn answer(source: &Source, seconds: NonZeroU64, top: NonZeroUsize) -> Result<Answer, String> {
+    crate::tools::answer_by(
+        Instant::now() + Duration::from_secs(seconds.get().saturating_add(NOW_COLLECTION_SECONDS)),
+    );
     std::thread::scope(|scope| {
-        let before = ps::snapshot()?;
-        let start = Instant::now();
         let host_before = host(source, 0)?;
-        let usage_before = usages(source, &before, host_before.euid, true);
+        let euid = host_before.euid;
+        // The first table is read beside the Window, so a slow ps delays no other reading.
+        let before_worker = scope.spawn(move || table(source, euid, true));
         let energy_worker = scope.spawn(move || top_tool::energy(seconds.get()));
         let gpu_worker = if host_before.euid == 0 {
             Some(scope.spawn(move || crate::tools::powermetrics::gpu_times(seconds.get())))
@@ -119,10 +184,29 @@ pub fn answer(source: &Source, seconds: NonZeroU64, top: NonZeroUsize) -> Result
             Some(Err(reason)) => Reading::Unavailable { reason },
             None => unreachable!("fixtures never invoke the native reader"),
         });
-        let after = ps::snapshot()?;
-        let elapsed = start.elapsed();
-        let window = elapsed.as_secs_f64();
-        let usage_after = usages(source, &after, host_after.euid, false);
+        let machine_worker = scope.spawn(machine);
+        let tables = before_worker
+            .join()
+            .unwrap_or_else(|_| Err("process table reader failed".into()))
+            .and_then(|before| Ok((before, table(source, host_after.euid, false)?)));
+        let mut skipped = Vec::new();
+        // The Window between the two process tables, present only when both were read.
+        let (before, after, usage_before, usage_after, table_window) = match tables {
+            Ok((before, after)) => (
+                before.processes,
+                after.processes,
+                before.usage,
+                after.usage,
+                Some(after.at.duration_since(before.at)),
+            ),
+            Err(reason) => {
+                skipped.push(json!({"measurement":"processes","count":1,"reason":format!("{reason}; machine-wide readings are kept"),"fix":"hostvitals doctor && hostvitals now"}));
+                Default::default()
+            }
+        };
+        let window = table_window.map_or(0.0, |e| e.as_secs_f64());
+        // Per-process skips only describe a process table that was read.
+        let mut process_skipped = Vec::new();
         let mut energy_skipped = Vec::new();
         let gpu = match gpu_worker {
             Some(worker) => match worker
@@ -131,12 +215,12 @@ pub fn answer(source: &Source, seconds: NonZeroU64, top: NonZeroUsize) -> Result
             {
                 Ok(times) => Some(times),
                 Err(reason) => {
-                    energy_skipped.push(json!({"measurement":"gpu_time_ms","count":after.len(),"reason":reason,"fix":format!("PATH=/usr/bin:/bin:/usr/sbin:/sbin:$PATH hostvitals now --seconds {} --top {}",seconds,top)}));
+                    process_skipped.push(json!({"measurement":"gpu_time_ms","count":after.len(),"reason":reason,"fix":format!("PATH=/usr/bin:/bin:/usr/sbin:/sbin:$PATH hostvitals now --seconds {} --top {}",seconds,top)}));
                     None
                 }
             },
             None => {
-                energy_skipped.push(json!({"measurement":"gpu_time_ms","count":after.len(),"reason":"per-process GPU time requires root (powermetrics --samplers tasks --show-process-gpu)","fix":format!("sudo hostvitals now --seconds {} --top {}",seconds,top)}));
+                process_skipped.push(json!({"measurement":"gpu_time_ms","count":after.len(),"reason":"per-process GPU time requires root (powermetrics --samplers tasks --show-process-gpu)","fix":format!("sudo hostvitals now --seconds {} --top {}",seconds,top)}));
                 None
             }
         };
@@ -147,11 +231,10 @@ pub fn answer(source: &Source, seconds: NonZeroU64, top: NonZeroUsize) -> Result
         {
             Ok(scores) => scores,
             Err(reason) => {
-                energy_skipped.push(json!({"measurement":"energy_impact","count":after.len(),"reason":reason,"fix":"PATH=/usr/bin:/bin:/usr/sbin:/sbin:$PATH hostvitals doctor && hostvitals now"}));
+                process_skipped.push(json!({"measurement":"energy_impact","count":after.len(),"reason":reason,"fix":"PATH=/usr/bin:/bin:/usr/sbin:/sbin:$PATH hostvitals doctor && hostvitals now"}));
                 BTreeMap::new()
             }
         };
-        let mut skipped = Vec::new();
         let disk_reading = match (&disk_before, &disk_after) {
             (Ok(before), Ok(after)) => {
                 policy::disk::host_change(before, after).map_err(str::to_owned)
@@ -397,16 +480,19 @@ pub fn answer(source: &Source, seconds: NonZeroU64, top: NonZeroUsize) -> Result
                 .filter(|p| p.energy_impact.is_none())
                 .count();
             if missing > 0 {
-                energy_skipped.push(json!({"measurement":"energy_impact","count":missing,"reason":"no matching PID and start time across inventories, or Process absent from top's final sample","fix":"hostvitals now --seconds 3"}));
+                process_skipped.push(json!({"measurement":"energy_impact","count":missing,"reason":"no matching PID and start time across inventories, or Process absent from top's final sample","fix":"hostvitals now --seconds 3"}));
             }
         }
         if gpu.is_some() {
             let missing = processes.iter().filter(|p| p.gpu_time_ms.is_none()).count();
             if missing > 0 {
-                energy_skipped.push(json!({"measurement":"gpu_time_ms","count":missing,"reason":"no matching PID and start time across inventories, or Process absent from powermetrics tasks","fix":format!("sudo hostvitals now --seconds {} --top {}",seconds,top)}));
+                process_skipped.push(json!({"measurement":"gpu_time_ms","count":missing,"reason":"no matching PID and start time across inventories, or Process absent from powermetrics tasks","fix":format!("sudo hostvitals now --seconds {} --top {}",seconds,top)}));
             }
         }
         skipped.extend(energy_skipped);
+        if table_window.is_some() {
+            skipped.extend(process_skipped);
+        }
         let pressure = match &host_after.memory.pressure_level {
             Reading::Available { data } => policy::findings::Pressure::from_kernel_level(*data)
                 .ok_or_else(|| format!("unknown kern.memorystatus_vm_pressure_level {data}")),
@@ -435,7 +521,7 @@ pub fn answer(source: &Source, seconds: NonZeroU64, top: NonZeroUsize) -> Result
                 swap_total_bytes: host_after.memory.swap_total_bytes,
             },
             &observations,
-            elapsed.as_nanos(),
+            table_window.map_or(0, |e| e.as_nanos()),
         );
         let process_subject = |pid| {
             let p = &after[&pid];
@@ -470,27 +556,18 @@ pub fn answer(source: &Source, seconds: NonZeroU64, top: NonZeroUsize) -> Result
             }),
         }
     }).collect();
-        let volumes = match df::snapshot() {
-            Ok(volumes) => {
-                let unavailable = volumes.iter().filter(|v| v.free_share.is_none()).count();
-                if unavailable > 0 {
-                    skipped.push(json!({"measurement":"volumes","count":unavailable,"reason":"volume capacity or available bytes unknown, invalid, overflowed or zero capacity; no free-space ratio can be judged","fix":"df -a -l -k -P && hostvitals now"}));
-                }
-                for v in &volumes {
-                    if policy::disk::low_free(v.size_bytes, v.free_bytes) {
-                        findings.push(json!({"rule":"volume_free","subject":{"kind":"volume","filesystem":v.filesystem,"mount_point":v.mount_point},"measured":{"size_bytes":v.size_bytes,"free_bytes":v.free_bytes,"free_share":v.free_share},"threshold":{"comparison":"<","percent":policy::disk::VOLUME_FREE_PERCENT},"next_command":"diskreap scan"}));
-                    }
-                }
-                Some(volumes)
-            }
-            Err(reason) => {
-                skipped.push(json!({"measurement":"volumes","count":1,"reason":reason,"fix":"PATH=/usr/bin:/bin:/usr/sbin:/sbin:$PATH df -a -l -k -P && hostvitals now"}));
-                None
-            }
-        };
-        let battery = crate::energy::battery(&mut skipped);
-        let thermal = crate::energy::thermal(&mut skipped, &mut findings);
-        let accelerators = gpu_utilization(&mut skipped);
+        let Machine {
+            volumes,
+            battery,
+            thermal,
+            accelerators,
+            findings: machine_findings,
+            skipped: machine_skipped,
+        } = machine_worker
+            .join()
+            .map_err(|_| "machine-wide reader failed; run hostvitals now".to_string())?;
+        findings.extend(machine_findings);
+        skipped.extend(machine_skipped);
         let usages: Vec<_> = processes
             .iter()
             .map(|p| policy::apps::ProcessUsage {
@@ -617,11 +694,35 @@ pub fn answer(source: &Source, seconds: NonZeroU64, top: NonZeroUsize) -> Result
         if total == 0.0 {
             return Err("host CPU ticks did not advance; run hostvitals now --seconds 3".into());
         }
+        let mut rankings = json!({
+            "processes_by_cpu": process_cpu,
+            "processes_by_memory": process_memory,
+            "apps_by_cpu": app_cpu,
+            "apps_by_memory": app_memory,
+            "processes_by_network_in": process_in,
+            "processes_by_network_out": process_out,
+            "apps_by_network_in": app_in,
+            "apps_by_network_out": app_out,
+            "processes_by_disk_written": process_writes,
+            "apps_by_disk_written": app_writes,
+            "processes_by_energy": ranked(&processes, top.get(), |p| p.energy_impact, |p| p.pid),
+            "apps_by_energy": ranked(&apps, top.get(), |p| p.energy_impact, |p| p.app_pid)
+        });
+        if table_window.is_none() {
+            // Each Ranking is unknown without a process table; callers keep the object's shape.
+            for ranking in rankings
+                .as_object_mut()
+                .into_iter()
+                .flat_map(|r| r.values_mut())
+            {
+                *ranking = Value::Null;
+            }
+        }
         Ok(Answer {
             findings,
             measurements: json!({
                 "source": if source.0.is_some() { "fixtures" } else { "host" },
-                "window_seconds": window,
+                "window_seconds": table_window.map(|e| e.as_secs_f64()),
                 "host": {
                     "battery": battery,
                     "thermal": thermal,
@@ -655,23 +756,10 @@ pub fn answer(source: &Source, seconds: NonZeroU64, top: NonZeroUsize) -> Result
                         "bytes_out_per_second": policy::network::per_second(host_network.bytes_out, network_seconds)
                     }
                 },
-                "processes": processes,
-                "apps": apps,
+                "processes": table_window.map(|_| &processes),
+                "apps": table_window.map(|_| &apps),
                 "volumes": volumes,
-                "rankings": {
-                    "processes_by_cpu": process_cpu,
-                    "processes_by_memory": process_memory,
-                    "apps_by_cpu": app_cpu,
-                    "apps_by_memory": app_memory,
-                    "processes_by_network_in": process_in,
-                    "processes_by_network_out": process_out,
-                    "apps_by_network_in": app_in,
-                    "apps_by_network_out": app_out,
-                    "processes_by_disk_written": process_writes,
-                    "apps_by_disk_written": app_writes,
-                    "processes_by_energy": ranked(&processes, top.get(), |p| p.energy_impact, |p| p.pid),
-                    "apps_by_energy": ranked(&apps, top.get(), |p| p.energy_impact, |p| p.app_pid)
-                },
+                "rankings": rankings,
                 "skipped": skipped
             }),
         })

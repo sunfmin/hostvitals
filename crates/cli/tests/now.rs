@@ -2296,3 +2296,58 @@ fn failed_empty_or_malformed_accelerator_reports_skip_only_the_gpu() {
         assert_eq!(a["host"]["thermal"]["pressure"], "nominal");
     }
 }
+
+#[test]
+fn a_crowded_process_table_still_answers_machine_wide_readings_within_the_bound() {
+    // sunfmin/control#1083: about 3,000 booting Simulator Processes made ps take past 8 s.
+    let rows: String = (1..=5000)
+        .map(|pid| row(pid, 501, "0:00.00", 1, "/launchd_sim"))
+        .collect();
+    let lab = Lab::new(rows.clone(), rows.clone());
+    lab.write(
+        "ps",
+        json!({"delay_ms":12000,"stdout_readings":[rows.clone(), rows]}),
+    );
+    let start = std::time::Instant::now();
+    let out = lab.run(&["now", "--seconds", "1", "--top", "2"]);
+    let elapsed = start.elapsed();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    // The whole now answers within --seconds plus its collection allowance.
+    assert!(
+        elapsed < std::time::Duration::from_secs(1 + 5 + 1),
+        "now took {elapsed:?}"
+    );
+    let a: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(a["host"]["cpu"]["idle_percent"], 60.0);
+    assert_eq!(a["host"]["memory"]["pressure"], "warn");
+    assert_eq!(a["host"]["memory"]["swap_used_bytes"], 8568459428u64);
+    assert_eq!(a["volumes"][0]["mount_point"], "/");
+    assert_eq!(a["host"]["thermal"]["pressure"], "nominal");
+    assert!(a["host"]["disk"]["window_seconds"].is_f64());
+    assert!(
+        a["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["rule"] == "swap_used")
+    );
+    // The per-process part is missing, never an empty inventory.
+    for section in ["processes", "apps", "window_seconds"] {
+        assert!(a[section].is_null(), "{section}: {}", a[section]);
+    }
+    // Rankings keep their shape, each one unknown.
+    let rankings = a["rankings"].as_object().unwrap();
+    assert_eq!(rankings.len(), 12);
+    assert!(rankings.values().all(Value::is_null), "{rankings:?}");
+    let skipped = skip(&a, "processes");
+    let reason = skipped["reason"].as_str().unwrap();
+    assert!(reason.contains("ps"), "{reason}");
+    assert!(reason.contains("seconds"), "{reason}");
+    let fix = skipped["fix"].as_str().unwrap();
+    assert!(fix.contains("hostvitals doctor"), "{fix}");
+    assert!(!fix.contains("sudo"), "{fix}");
+}

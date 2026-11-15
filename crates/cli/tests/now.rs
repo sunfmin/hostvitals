@@ -1888,40 +1888,50 @@ fn live_now_reads_host_and_every_user_without_root() {
     );
     let a: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(a["source"], "host");
+    // On a crowded host the answer's bound can stop any read (ADR-0009), so each reading is
+    // either valid or named in `skipped` — never invented, never silently missing.
+    let skipped_measurement = |name: &str| {
+        a["skipped"].as_array().unwrap().iter().any(|s| {
+            let m = s["measurement"].as_str().unwrap();
+            m == name
+                || m.strip_prefix(name)
+                    .is_some_and(|rest| rest.starts_with('.'))
+        })
+    };
     let disk = &a["host"]["disk"];
     for field in ["read_bytes_per_second", "written_bytes_per_second"] {
         assert!(disk.get(field).is_some());
-        if let Some(rate) = disk[field].as_f64() {
-            assert!(rate.is_finite() && rate >= 0.0);
-        } else {
-            assert!(
-                a["skipped"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|s| s["measurement"].as_str().unwrap().starts_with("host.disk"))
-            );
+        match disk[field].as_f64() {
+            Some(rate) => assert!(rate.is_finite() && rate >= 0.0),
+            None => assert!(skipped_measurement("host.disk"), "{a}"),
         }
     }
-    assert!(disk["window_seconds"].as_f64().is_some_and(|s| s >= 1.0));
-    let volumes = a["volumes"].as_array().unwrap();
-    assert!(volumes.iter().any(|v| v["mount_point"] == "/"));
-    for v in volumes {
-        assert!(!v["filesystem"].as_str().unwrap().is_empty());
-        assert!(v["mount_point"].as_str().unwrap().starts_with('/'));
-        if let Some(share) = v["free_share"].as_f64() {
-            assert!((0.0..=1.0).contains(&share));
-        }
+    match disk["window_seconds"].as_f64() {
+        Some(seconds) => assert!(seconds >= 1.0),
+        None => assert!(skipped_measurement("host.disk"), "{a}"),
     }
-    assert!(a["host"]["battery"]["present"].is_boolean());
-    assert!(a["host"]["thermal"]["cpu_throttled"].is_boolean());
-    let skipped_measurement = |name: &str| {
-        a["skipped"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|s| s["measurement"] == name)
-    };
+    match a["volumes"].as_array() {
+        Some(volumes) => {
+            assert!(volumes.iter().any(|v| v["mount_point"] == "/"));
+            for v in volumes {
+                assert!(!v["filesystem"].as_str().unwrap().is_empty());
+                assert!(v["mount_point"].as_str().unwrap().starts_with('/'));
+                if let Some(share) = v["free_share"].as_f64() {
+                    assert!((0.0..=1.0).contains(&share));
+                }
+            }
+        }
+        None => assert!(skipped_measurement("volumes"), "{a}"),
+    }
+    assert!(
+        a["host"]["battery"]["present"].is_boolean() || skipped_measurement("battery"),
+        "{a}"
+    );
+    assert!(
+        a["host"]["thermal"]["cpu_throttled"].is_boolean()
+            || skipped_measurement("thermal.cpu_limits"),
+        "{a}"
+    );
     let thermal_pressure = &a["host"]["thermal"]["pressure"];
     assert!(
         ["nominal", "moderate", "heavy", "trapping", "sleeping"]
@@ -1951,38 +1961,14 @@ fn live_now_reads_host_and_every_user_without_root() {
                 assert!(value <= 1.0);
             }
         } else {
-            assert!(
-                a["skipped"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|s| s["measurement"] == "power"
-                        || s["measurement"] == format!("power.{key}"))
-            );
+            assert!(skipped_measurement("power"), "{a}");
         }
     }
-    assert!(
-        a["processes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|p| p["uid"] == 0 && p["energy_impact"].as_f64().is_some_and(|s| s >= 0.0))
-    );
-    assert!(a["host"]["network"]["window_seconds"].as_f64().unwrap() >= 1.0);
-    let network_processes = a["processes"].as_array().unwrap();
-    for direction in ["bytes_in_per_second", "bytes_out_per_second"] {
-        assert!(
-            network_processes.iter().any(
-                |p| p["uid"] == 0 && p["network"][direction].as_f64().is_some_and(|n| n >= 0.0)
-            ),
-            "root network unreadable: {a}"
-        );
-        for p in network_processes {
-            if let Some(rate) = p["network"][direction].as_f64() {
-                assert!(rate.is_finite() && rate >= 0.0);
-            }
-        }
+    match a["host"]["network"]["window_seconds"].as_f64() {
+        Some(seconds) => assert!(seconds >= 1.0),
+        None => assert!(skipped_measurement("network"), "{a}"),
     }
+    // CPU and memory come from libproc and Mach, which the bound never stops.
     let cpu = &a["host"]["cpu"];
     let mut total = 0.0;
     for key in ["user_percent", "system_percent", "idle_percent"] {
@@ -2001,7 +1987,31 @@ fn live_now_reads_host_and_every_user_without_root() {
         a["host"]["memory"]["swap_used_bytes"].as_u64().unwrap()
             <= a["host"]["memory"]["swap_total_bytes"].as_u64().unwrap()
     );
-    let processes = a["processes"].as_array().unwrap();
+    let Some(processes) = a["processes"].as_array() else {
+        assert!(skipped_measurement("processes"), "{a}");
+        assert!(a["rankings"]["processes_by_memory"].is_null());
+        return;
+    };
+    assert!(
+        processes
+            .iter()
+            .any(|p| p["uid"] == 0 && p["energy_impact"].as_f64().is_some_and(|s| s >= 0.0))
+            || skipped_measurement("energy_impact"),
+        "{a}"
+    );
+    for direction in ["bytes_in_per_second", "bytes_out_per_second"] {
+        assert!(
+            processes.iter().any(
+                |p| p["uid"] == 0 && p["network"][direction].as_f64().is_some_and(|n| n >= 0.0)
+            ) || skipped_measurement("network"),
+            "root network unreadable: {a}"
+        );
+        for p in processes {
+            if let Some(rate) = p["network"][direction].as_f64() {
+                assert!(rate.is_finite() && rate >= 0.0);
+            }
+        }
+    }
     assert!(
         processes
             .iter()
